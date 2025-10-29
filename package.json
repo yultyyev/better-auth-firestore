@@ -1,0 +1,56 @@
+{
+  "name": "better-auth-firestore",
+  "version": "0.0.1",
+  "private": false,
+  "description": "Firestore adapter for Better Auth (Firebase Admin SDK)",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "clean": "rimraf dist",
+    "test": "./tests/test.sh",
+    "lint": "biome check --formatter-enabled=false",
+    "lint:fix": "biome check --write",
+    "lint:fix:unsafe": "biome check --write --unsafe"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@10.0.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yultyyev/better-auth-firestore.git"
+  },
+  "keywords": [
+    "better-auth",
+    "firebase",
+    "firestore",
+    "adapter",
+    "authentication"
+  ],
+  "peerDependencies": {
+    "better-auth": "*",
+    "firebase-admin": ">=13",
+    "typescript": "^5.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.2",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.5"
+  }
+}
+
