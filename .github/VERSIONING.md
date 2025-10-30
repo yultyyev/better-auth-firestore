@@ -73,3 +73,15 @@ chore: update dependencies
 - `main` → Stable releases (1.0.0, 1.1.0, 2.0.0, etc.)
 - `next` → Pre-releases (1.1.0-alpha.1, 1.1.0-alpha.2, etc.)
 
+### ⚠️ Important: Force Pushing
+
+**Avoid force pushing to `main` or `next` branches** after semantic-release has created tags:
+
+- Force pushing can rewrite commit history, causing tags to point to wrong commits
+- If you must force push, delete any affected tags first:
+  ```bash
+  git push origin :refs/tags/v1.0.0  # Delete tag
+  ```
+- Better: Use `--force-with-lease` to prevent accidental history rewrites
+- Best: Avoid force pushing on release branches entirely
+

@@ -10,10 +10,17 @@ const configs: Config[] = [
 ];
 
 describe.each<Config>(configs)("Firestore adapter (%s)", (cfg: Config) => {
-	const db = initFirestore({ name: `test-${cfg.namingStrategy}`, projectId: "test" });
+	const db = initFirestore({
+		name: `test-${cfg.namingStrategy}`,
+		projectId: "test",
+	});
 
-		return runAdapterTest({
-			getAdapter: async (betterAuthOptions = {}) =>
-				firestoreAdapter({ firestore: db, namingStrategy: cfg.namingStrategy, debugLogs: false })(betterAuthOptions as any),
-		});
+	return runAdapterTest({
+		getAdapter: async (betterAuthOptions = {}) =>
+			firestoreAdapter({
+				firestore: db,
+				namingStrategy: cfg.namingStrategy,
+				debugLogs: false,
+			})(betterAuthOptions as any),
+	});
 });

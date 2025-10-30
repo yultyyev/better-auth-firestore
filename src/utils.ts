@@ -13,9 +13,8 @@ const MAP_TO_FIRESTORE: Record<string, string | undefined> = {
 	emailVerified: "email_verified",
 };
 
-const MAP_FROM_FIRESTORE: Record<string, string | undefined> = Object.fromEntries(
-	Object.entries(MAP_TO_FIRESTORE).map(([k, v]) => [v!, k])
-);
+const MAP_FROM_FIRESTORE: Record<string, string | undefined> =
+	Object.fromEntries(Object.entries(MAP_TO_FIRESTORE).map(([k, v]) => [v!, k]));
 
 const identity = <T>(x: T) => x;
 
@@ -48,7 +47,7 @@ export function getConverter<Document extends Record<string, any>>(options: {
 			return document;
 		},
 		fromFirestore(
-			snapshot: FirebaseFirestore.QueryDocumentSnapshot<Document>
+			snapshot: FirebaseFirestore.QueryDocumentSnapshot<Document>,
 		): Document {
 			const document = snapshot.data()!;
 			const object: Record<string, unknown> = {};
@@ -64,21 +63,21 @@ export function getConverter<Document extends Record<string, any>>(options: {
 }
 
 export async function getOneDoc<T>(
-	querySnapshot: FirebaseFirestore.Query<T>
+	querySnapshot: FirebaseFirestore.Query<T>,
 ): Promise<T | null> {
 	const querySnap = await querySnapshot.limit(1).get();
 	return querySnap.docs[0]?.data() ?? null;
 }
 
 export async function getDoc<T>(
-	docRef: FirebaseFirestore.DocumentReference<T>
+	docRef: FirebaseFirestore.DocumentReference<T>,
 ): Promise<T | null> {
 	const docSnap = await docRef.get();
 	return docSnap.data() ?? null;
 }
 
 export async function deleteDocs<T>(
-	querySnapshot: FirebaseFirestore.Query<T>
+	querySnapshot: FirebaseFirestore.Query<T>,
 ): Promise<void> {
 	const querySnap = await querySnapshot.get();
 	for (const doc of querySnap.docs) {
@@ -94,7 +93,7 @@ export function collectionsFactory(
 		sessions: string;
 		accounts: string;
 		verificationTokens: string;
-	}
+	},
 ) {
 	return {
 		users: db
@@ -108,10 +107,6 @@ export function collectionsFactory(
 			.withConverter(getConverter<any>({ preferSnakeCase })),
 		verification_tokens: db
 			.collection(collections.verificationTokens)
-			.withConverter(
-				getConverter<any>({ preferSnakeCase, excludeId: true })
-			),
+			.withConverter(getConverter<any>({ preferSnakeCase, excludeId: true })),
 	};
 }
-
-

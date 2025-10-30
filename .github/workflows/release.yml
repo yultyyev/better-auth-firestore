@@ -9,15 +9,16 @@ jobs:
   release:
     runs-on: ubuntu-latest
     permissions:
-      contents: write        # for changelog commit & GitHub release
+      contents: write
       issues: write
       pull-requests: write
       packages: write
-      id-token: write        # for npm trusted publishing (OIDC)
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # needed for semantic-release
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: pnpm/action-setup@v4
         with:
@@ -28,8 +29,8 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
           cache: 'pnpm'
-          # OIDC token is automatically provided when id-token: write permission is set
-          # This enables npm Trusted Publishers - no NPM_TOKEN secret needed!
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -47,9 +48,6 @@ jobs:
       - name: Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # NPM_TOKEN only needed if not using Trusted Publishers (OIDC)
-          # For OIDC: no token needed, npm authenticates via GitHub Actions' OIDC token
-          # For token fallback: set granular token with package write permissions
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npx semantic-release
 

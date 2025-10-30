@@ -1,5 +1,5 @@
 {
-  "name": "better-auth-firestore",
+  "name": "@yultyyev/better-auth-firestore",
   "version": "0.0.0-development",
   "private": false,
   "description": "Firestore adapter for Better Auth (Firebase Admin SDK)",
@@ -38,6 +38,9 @@
     "type": "git",
     "url": "git+https://github.com/yultyyev/better-auth-firestore.git"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "better-auth",
     "firebase",
@@ -63,4 +66,3 @@
     "vitest": "^4.0.5"
   }
 }
-

@@ -9,14 +9,14 @@ Firestore (Firebase Admin SDK) adapter for Better Auth. Drop-in replacement for 
 ## Installation
 
 ```bash
-pnpm add better-auth-firestore firebase-admin better-auth
+pnpm add @yultyyev/better-auth-firestore firebase-admin better-auth
 ```
 
 ## Quick start
 
 ```ts
 import { betterAuth } from "better-auth";
-import { firestoreAdapter, initFirestore } from "better-auth-firestore";
+import { firestoreAdapter, initFirestore } from "@yultyyev/better-auth-firestore";
 import { cert } from "firebase-admin/app";
 
 const firestore = initFirestore({
