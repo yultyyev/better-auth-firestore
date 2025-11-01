@@ -6,9 +6,35 @@ import type { Firestore, Transaction } from "firebase-admin/firestore";
 import { FieldPath, Timestamp } from "firebase-admin/firestore";
 import { initFirestore } from "./firestore";
 import type { FirestoreAdapterConfig, NamingStrategy } from "./types";
-import { mapFieldsFactory } from "./utils";
 
 type CollectionsOverride = NonNullable<FirestoreAdapterConfig["collections"]>;
+
+type FieldMapper = {
+	toDb: (field: string) => string;
+	fromDb: (field: string) => string;
+};
+
+const MAP_TO_FIRESTORE: Record<string, string | undefined> = {
+	userId: "user_id",
+	sessionToken: "session_token",
+	providerAccountId: "provider_account_id",
+	emailVerified: "email_verified",
+};
+
+const MAP_FROM_FIRESTORE: Record<string, string | undefined> =
+	Object.fromEntries(Object.entries(MAP_TO_FIRESTORE).map(([k, v]) => [v!, k]));
+
+const identity = <T>(x: T) => x;
+
+function mapFieldsFactory(preferSnakeCase?: boolean): FieldMapper {
+	if (preferSnakeCase) {
+		return {
+			toDb: (field: string) => MAP_TO_FIRESTORE[field] ?? field,
+			fromDb: (field: string) => MAP_FROM_FIRESTORE[field] ?? field,
+		};
+	}
+	return { toDb: identity, fromDb: identity } as FieldMapper;
+}
 
 type WhereCondition = {
 	field: string;
