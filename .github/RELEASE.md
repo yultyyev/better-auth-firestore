@@ -1,4 +1,4 @@
-# Semantic Release Versioning
+# Release Process
 
 ## How Versioning Works
 
@@ -16,17 +16,13 @@ Semantic-release automatically determines version bumps based on your commit mes
   - Example: `feat!: change API interface` 
   - Or in footer: `BREAKING CHANGE: renamed adapter config`
 
-- No releaseable changes → No version bump (skip release)
+- No releasable changes → No version bump (skip release)
 
-### First Release:
+### Release Workflow:
 
-Since this is the first release, a `feat:` commit will create **v1.0.0**.
-
-### Workflow:
-
-1. **You commit** with conventional commit format:
+1. **Commit** with conventional commit format:
    ```bash
-   git commit -m "feat: initial Firestore adapter"
+   git commit -m "feat: add new feature"
    ```
 
 2. **Push to `main` branch**:
@@ -35,18 +31,16 @@ Since this is the first release, a `feat:` commit will create **v1.0.0**.
    ```
 
 3. **GitHub Actions automatically**:
-   - Runs tests
+   - Runs tests and linting
    - Builds the package
    - Runs semantic-release which:
-     - Analyzes commits since last release (or initial commit)
-     - Determines new version (e.g., 1.0.0 for first `feat:`)
+     - Analyzes commits since last release
+     - Determines new version
      - Updates `package.json` version
      - Generates/updates `CHANGELOG.md`
      - Publishes to npm
      - Creates GitHub release
      - Commits version bump and changelog back to repo
-
-4. **Done!** Package is on npm 🎉
 
 ### Example Commit Messages:
 
@@ -66,6 +60,7 @@ BREAKING CHANGE: removes old adapter() function
 # No release (docs, refactor without breaking)
 docs: update README
 chore: update dependencies
+refactor: remove unused code
 ```
 
 ### Release Branches:
