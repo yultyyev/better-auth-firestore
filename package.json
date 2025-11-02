@@ -46,7 +46,11 @@
     "firebase",
     "firestore",
     "adapter",
-    "authentication"
+    "authjs",
+    "nextauth",
+    "oauth",
+    "session",
+    "typescript"
   ],
   "peerDependencies": {
     "better-auth": "*",
