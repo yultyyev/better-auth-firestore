@@ -12,6 +12,19 @@
 
 ---
 
+## Related: Firebase Auth Plugin
+
+For Firebase Authentication integration with Better Auth, see **[better-auth-firebase-auth](https://github.com/yultyyev/better-auth-firebase-auth)**. It provides:
+
+- Firebase Authentication provider support (Email/Password, Google, etc.)
+- Client-side or server-side token generation
+- Password reset functionality
+- Full TypeScript support
+
+Use `better-auth-firebase-auth` for authentication and `@yultyyev/better-auth-firestore` for data storage.
+
+---
+
 ## Installation
 
 # npm
