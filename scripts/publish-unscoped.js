@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
-import { readFileSync, writeFileSync } from 'fs';
 import { execSync } from 'child_process';
-import { fileURLToPath } from 'url';
+import { readFileSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
