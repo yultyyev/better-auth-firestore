@@ -1,5 +1,5 @@
 {
-  "name": "@yultyyev/better-auth-firestore",
+  "name": "better-auth-firestore",
   "version": "0.0.0-development",
   "private": false,
   "description": "Firestore adapter for Better Auth (Firebase Admin SDK)",

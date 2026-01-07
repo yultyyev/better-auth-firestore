@@ -1,12 +1,14 @@
 # better-auth-firestore
 
-[![npm version](https://img.shields.io/npm/v/@yultyyev/better-auth-firestore.svg)](https://www.npmjs.com/package/@yultyyev/better-auth-firestore)
+[![npm version](https://img.shields.io/npm/v/better-auth-firestore.svg)](https://www.npmjs.com/package/better-auth-firestore)
 [![CI](https://github.com/yultyyev/better-auth-firestore/actions/workflows/release.yml/badge.svg)](https://github.com/yultyyev/better-auth-firestore/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 
+> **Note:** If you're using `@yultyyev/better-auth-firestore`, please migrate to `better-auth-firestore`. The scoped package is deprecated. See [Migration from Scoped Package](#migration-from-scoped-package) below.
+
 **Firestore (Firebase Admin SDK) adapter for Better Auth.** A drop-in replacement for the Auth.js Firebase adapter with matching data shape.
 
-- **Install:** `pnpm add @yultyyev/better-auth-firestore firebase-admin better-auth`
+- **Install:** `pnpm add better-auth-firestore firebase-admin better-auth`
 - **Docs:** [Quickstart](#quick-start) • [Options](#options) • [Migration](#migration-from-authjsnextauth) • [Emulator](#testing-with-firestore-emulator)
 - **Example:** See [`/examples/minimal`](./examples/minimal) for a complete Next.js App Router example
 
@@ -21,7 +23,7 @@ For Firebase Authentication integration with Better Auth, see **[better-auth-fir
 - Password reset functionality
 - Full TypeScript support
 
-Use `better-auth-firebase-auth` for authentication and `@yultyyev/better-auth-firestore` for data storage.
+Use `better-auth-firebase-auth` for authentication and `better-auth-firestore` for data storage.
 
 ---
 
@@ -30,31 +32,31 @@ Use `better-auth-firebase-auth` for authentication and `@yultyyev/better-auth-fi
 # npm
 
 ```bash
-npm install @yultyyev/better-auth-firestore firebase-admin better-auth
+npm install better-auth-firestore firebase-admin better-auth
 ```
 
 # pnpm
 
 ```bash
-pnpm add @yultyyev/better-auth-firestore firebase-admin better-auth
+pnpm add better-auth-firestore firebase-admin better-auth
 ```
 
 # yarn
 
 ```bash
-yarn add @yultyyev/better-auth-firestore firebase-admin better-auth
+yarn add better-auth-firestore firebase-admin better-auth
 ```
 
 # bun
 
 ```bash
-bun add @yultyyev/better-auth-firestore firebase-admin better-auth
+bun add better-auth-firestore firebase-admin better-auth
 ```
 
 ### Minimal usage
 
 ```ts
-import { firestoreAdapter } from "@yultyyev/better-auth-firestore";
+import { firestoreAdapter } from "better-auth-firestore";
 import { createAuth } from "better-auth";
 import { getFirestore } from "firebase-admin/firestore";
 
@@ -67,7 +69,7 @@ export const auth = createAuth({
 
 ```ts
 import { betterAuth } from "better-auth";
-import { firestoreAdapter, initFirestore } from "@yultyyev/better-auth-firestore";
+import { firestoreAdapter, initFirestore } from "better-auth-firestore";
 import { cert } from "firebase-admin/app";
 
 const firestore = initFirestore({
@@ -119,7 +121,7 @@ The adapter requires a composite index on the `verification` collection. Choose 
 You can generate a direct link that pre-fills the index creation form:
 
 ```ts
-import { generateIndexSetupUrl } from "@yultyyev/better-auth-firestore";
+import { generateIndexSetupUrl } from "better-auth-firestore";
 
 // Generate the URL (pre-fills the form automatically)
 const url = generateIndexSetupUrl(
@@ -145,7 +147,7 @@ Or manually:
 
 **Option B: Use firestore.indexes.json Template**
 
-1. Copy `firestore.indexes.json` from `node_modules/@yultyyev/better-auth-firestore/` to your project root
+1. Copy `firestore.indexes.json` from `node_modules/better-auth-firestore/` to your project root
 2. (Optional) Update collection name if using custom `collections.verificationTokens`
 3. Deploy: `firebase deploy --only firestore:indexes`
 
@@ -257,6 +259,30 @@ service cloud.firestore {
 
 This adapter is the Better Auth-native solution for Firestore users, recommended for new projects.
 
+## Migration from Scoped Package
+
+If you're currently using `@yultyyev/better-auth-firestore`, migrate to `better-auth-firestore`:
+
+1. **Update package name in your dependencies:**
+   ```bash
+   npm uninstall @yultyyev/better-auth-firestore
+   npm install better-auth-firestore
+   # or
+   pnpm remove @yultyyev/better-auth-firestore
+   pnpm add better-auth-firestore
+   ```
+
+2. **Update import statements:**
+   ```ts
+   // Before
+   import { firestoreAdapter } from "@yultyyev/better-auth-firestore";
+   
+   // After
+   import { firestoreAdapter } from "better-auth-firestore";
+   ```
+
+That's it! The API is identical, so no code changes are needed beyond the import path.
+
 ## Migration from Auth.js/NextAuth
 
 > **For complete migration steps**, see the [Better Auth NextAuth Migration Guide](https://www.better-auth.com/docs/guides/next-auth-migration-guide), which covers route handlers, client setup, and server-side session handling.
@@ -276,7 +302,7 @@ Simply replace your Auth.js Firebase adapter with this one:
 import { FirestoreAdapter } from "@auth/firebase-adapter";
 
 // After (Better Auth)
-import { firestoreAdapter } from "@yultyyev/better-auth-firestore";
+import { firestoreAdapter } from "better-auth-firestore";
 
 // Same Firestore instance, same collections, same data shape
 export const auth = betterAuth({
@@ -332,7 +358,7 @@ export const { GET, POST } = toNextJsHandler(auth);
 ### Usage in Node.js script
 
 ```ts
-import { firestoreAdapter } from "@yultyyev/better-auth-firestore";
+import { firestoreAdapter } from "better-auth-firestore";
 import { createAuth } from "better-auth";
 import { initializeApp, cert } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
@@ -390,7 +416,7 @@ privateKey: process.env.FIREBASE_PRIVATE_KEY!.replace(/\\n/g, "\n")
 
 You can generate a direct link using:
 ```ts
-import { generateIndexSetupUrl } from "@yultyyev/better-auth-firestore";
+import { generateIndexSetupUrl } from "better-auth-firestore";
 const url = generateIndexSetupUrl(process.env.FIREBASE_PROJECT_ID!);
 console.log(url); // Open this URL to create the index
 ```
