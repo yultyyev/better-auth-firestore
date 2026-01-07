@@ -110,13 +110,54 @@ export const auth = betterAuth({
 3. Choose your preferred security rules mode (you can update rules later)
 4. Select a location for your database
 
-### 3. Generate Service Account Key
+### 3. Create Required Firestore Index
+
+The adapter requires a composite index on the `verification` collection. Choose one of the following methods:
+
+**Option A: Create via Firebase Console (Recommended)**
+
+You can generate a direct link that pre-fills the index creation form:
+
+```ts
+import { generateIndexSetupUrl } from "@yultyyev/better-auth-firestore";
+
+// Generate the URL (pre-fills the form automatically)
+const url = generateIndexSetupUrl(
+  process.env.FIREBASE_PROJECT_ID!,
+  "(default)", // or your database ID if using a named database
+  "verification" // or your custom collection name
+);
+
+console.log("Open this URL to create the index:", url);
+```
+
+Or manually:
+1. Open: `https://console.firebase.google.com/project/YOUR_PROJECT_ID/firestore/indexes`
+2. Click "Create Index"
+3. Configure:
+   - **Collection ID:** `verification`
+   - **Fields:**
+     - `identifier` (Ascending)
+     - `createdAt` (Descending)
+     - `__name__` (Descending)
+   - **Query scope:** Collection
+4. Click "Create" and wait for the index to build (usually a few minutes)
+
+**Option B: Use firestore.indexes.json Template**
+
+1. Copy `firestore.indexes.json` from `node_modules/@yultyyev/better-auth-firestore/` to your project root
+2. (Optional) Update collection name if using custom `collections.verificationTokens`
+3. Deploy: `firebase deploy --only firestore:indexes`
+
+> **Note:** If you're using a custom collection name for verification tokens (via `collections.verificationTokens`), replace `verification` with your custom collection name in the index configuration.
+
+### 4. Generate Service Account Key
 
 1. Go to **Project Settings** (gear icon) → **Service Accounts**
 2. Under "Firebase Admin SDK", click **"Generate new private key"**
 3. Download the JSON file (keep it secure - never commit it to version control)
 
-### 4. Extract Environment Variables
+### 5. Extract Environment Variables
 
 From the downloaded service account JSON file, extract these values:
 
@@ -126,7 +167,7 @@ From the downloaded service account JSON file, extract these values:
 
 **Alternative:** You can use the JSON file directly by setting `GOOGLE_APPLICATION_CREDENTIALS` environment variable to the path of your service account JSON file.
 
-### 5. (Optional) Set up Security Rules
+### 6. (Optional) Set up Security Rules
 
 The adapter uses the Firebase Admin SDK (server-side), so Firestore security rules should deny direct client access. See [Firestore Security Rules](#firestore-security-rules) below.
 
@@ -187,6 +228,8 @@ The adapter maintains the same data shape as Auth.js/NextAuth for seamless migra
 | `verificationTokens` | `identifier`, `token`, `expires` |
 
 > **Defaults:** Collections default to `users`, `sessions`, `accounts`, `verification_tokens` (snake_case) / `verificationTokens` (default). See [Options](#options) to customize collection names.
+>
+> **Note:** The `verification` collection requires a composite index on `identifier` (ASC), `createdAt` (DESC), `__name__` (DESC). See [Firebase Setup - Step 3](#3-create-required-firestore-index) for setup instructions.
 
 ### Minimal Firestore Security Rules (server/admin only)
 
@@ -338,6 +381,19 @@ privateKey: process.env.FIREBASE_PRIVATE_KEY!.replace(/\\n/g, "\n")
 **Symptom:** Firebase Admin SDK requests hang or time out during local development.
 
 **Fix:** Use the Firestore Emulator and set `FIRESTORE_EMULATOR_HOST=localhost:8080` before running your app. See [Testing with Firestore Emulator](#testing-with-firestore-emulator) for setup instructions.
+
+### Error: Missing or insufficient permissions / Index required
+
+**Symptom:** Queries on verification tokens fail with errors about missing index or insufficient permissions.
+
+**Fix:** Create the required composite index on the `verification` collection. See [Firebase Setup - Step 3](#3-create-required-firestore-index) for detailed instructions.
+
+You can generate a direct link using:
+```ts
+import { generateIndexSetupUrl } from "@yultyyev/better-auth-firestore";
+const url = generateIndexSetupUrl(process.env.FIREBASE_PROJECT_ID!);
+console.log(url); // Open this URL to create the index
+```
 
 ## Related Links
 
