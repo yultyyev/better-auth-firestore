@@ -70,7 +70,7 @@ export default function Home() {
                   rel="noopener noreferrer"
                   className="font-medium text-zinc-950 dark:text-zinc-50 underline hover:text-zinc-700 dark:hover:text-zinc-300"
                 >
-                  @yultyyev/better-auth-firestore
+                  better-auth-firestore
                 </a>
                 . Sign up or sign in to get started and explore the authentication flow.
               </>

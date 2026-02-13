@@ -1,6 +1,6 @@
 # Better Auth Firestore - Minimal Example
 
-This is a minimal example setup demonstrating how to use [`@yultyyev/better-auth-firestore`](https://github.com/yultyyev/better-auth-firestore) with [better-auth](https://www.better-auth.com/) in a Next.js application.
+This is a minimal example setup demonstrating how to use [`better-auth-firestore`](https://github.com/yultyyev/better-auth-firestore) with [better-auth](https://www.better-auth.com/) in a Next.js application.
 
 This example showcases:
 - Email/password authentication with better-auth
@@ -69,5 +69,5 @@ Open [http://localhost:3000](http://localhost:3000) to see the example.
 ## Learn More
 
 - [better-auth Documentation](https://www.better-auth.com/docs)
-- [@yultyyev/better-auth-firestore](https://github.com/yultyyev/better-auth-firestore)
+- [better-auth-firestore](https://github.com/yultyyev/better-auth-firestore)
 - [Next.js Documentation](https://nextjs.org/docs)

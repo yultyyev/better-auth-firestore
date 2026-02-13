@@ -1,4 +1,4 @@
-import { firestoreAdapter } from "@yultyyev/better-auth-firestore";
+import { firestoreAdapter } from "better-auth-firestore";
 import { betterAuth } from "better-auth";
 import admin from "firebase-admin";
 

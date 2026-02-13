@@ -8,12 +8,12 @@ importers:
 
   .:
     dependencies:
-      '@yultyyev/better-auth-firestore':
-        specifier: ^1.0.0
-        version: 1.0.0(better-auth@1.4.18(next@16.1.5(@babel/core@7.29.0)(@opentelemetry/api@1.9.0)(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(firebase-admin@13.6.1)(typescript@5.9.3)
       better-auth:
         specifier: ^1.4.18
         version: 1.4.18(next@16.1.5(@babel/core@7.29.0)(@opentelemetry/api@1.9.0)(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
+      better-auth-firestore:
+        specifier: ^1.0.0
+        version: 1.1.0(better-auth@1.4.18(next@16.1.5(@babel/core@7.29.0)(@opentelemetry/api@1.9.0)(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(firebase-admin@13.6.1)(typescript@5.9.3)
       firebase-admin:
         specifier: ^13.6.1
         version: 13.6.1
@@ -848,15 +848,6 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@yultyyev/better-auth-firestore@1.0.0':
-    resolution: {integrity: sha512-qnOaGMEyp8R3L9+8B1bZnMQeCjd1YG1FbotMgr8t8USmvl8dB06d/+LcPl2aECxjyu7QKaJUZfq5Fy6nV69bOA==}
-    engines: {node: '>=22'}
-    deprecated: Package deprecated. Please use 'better-auth-firestore' instead. See https://github.com/yultyyev/better-auth-firestore for migration details.
-    peerDependencies:
-      better-auth: '*'
-      firebase-admin: '>=13'
-      typescript: ^5.0.0
-
   abort-controller@3.0.0:
     resolution: {integrity: sha512-h8lQ8tacZYnR3vNQTgibj+tODHI5/+l06Au2Pcriv/Gmet0eaj4TwWH41sO9wnHDiQsEj19q0drzdWdeAHtweg==}
     engines: {node: '>=6.5'}
@@ -967,6 +958,14 @@ packages:
   baseline-browser-mapping@2.9.19:
     resolution: {integrity: sha512-ipDqC8FrAl/76p2SSWKSI+H9tFwm7vYqXQrItCuiVPt26Km0jS+NzSsBWAaBusvSbQcfJG+JitdMm+wZAgTYqg==}
     hasBin: true
+
+  better-auth-firestore@1.1.0:
+    resolution: {integrity: sha512-bJr3W+LeAcnXu7pxo4Md9DalCw26oMDlRzHKT45IbONsMMfr3puUbb2v+K/wHfKezVMh/WR0znwKNRd76MElmw==}
+    engines: {node: '>=22'}
+    peerDependencies:
+      better-auth: '*'
+      firebase-admin: '>=13'
+      typescript: ^5.0.0
 
   better-auth@1.4.18:
     resolution: {integrity: sha512-bnyifLWBPcYVltH3RhS7CM62MoelEqC6Q+GnZwfiDWNfepXoQZBjEvn4urcERC7NTKgKq5zNBM8rvPvRBa6xcg==}
@@ -3324,12 +3323,6 @@ snapshots:
   '@unrs/resolver-binding-win32-x64-msvc@1.11.1':
     optional: true
 
-  '@yultyyev/better-auth-firestore@1.0.0(better-auth@1.4.18(next@16.1.5(@babel/core@7.29.0)(@opentelemetry/api@1.9.0)(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(firebase-admin@13.6.1)(typescript@5.9.3)':
-    dependencies:
-      better-auth: 1.4.18(next@16.1.5(@babel/core@7.29.0)(@opentelemetry/api@1.9.0)(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
-      firebase-admin: 13.6.1
-      typescript: 5.9.3
-
   abort-controller@3.0.0:
     dependencies:
       event-target-shim: 5.0.1
@@ -3463,6 +3456,12 @@ snapshots:
   base64-js@1.5.1: {}
 
   baseline-browser-mapping@2.9.19: {}
+
+  better-auth-firestore@1.1.0(better-auth@1.4.18(next@16.1.5(@babel/core@7.29.0)(@opentelemetry/api@1.9.0)(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(firebase-admin@13.6.1)(typescript@5.9.3):
+    dependencies:
+      better-auth: 1.4.18(next@16.1.5(@babel/core@7.29.0)(@opentelemetry/api@1.9.0)(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
+      firebase-admin: 13.6.1
+      typescript: 5.9.3
 
   better-auth@1.4.18(next@16.1.5(@babel/core@7.29.0)(@opentelemetry/api@1.9.0)(react-dom@19.2.0(react@19.2.0))(react@19.2.0))(react-dom@19.2.0(react@19.2.0))(react@19.2.0):
     dependencies:

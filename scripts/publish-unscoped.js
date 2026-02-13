@@ -93,7 +93,7 @@ try {
     const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
     if (pkg.name === 'better-auth-firestore') {
       // Restore original name and version from the tag
-      pkg.name = '@yultyyev/better-auth-firestore';
+      pkg.name = originalName;
       pkg.version = originalVersion;
       writeFileSync(packageJsonPath, JSON.stringify(pkg, null, 2) + '\n');
     }
