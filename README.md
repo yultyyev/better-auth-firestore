@@ -57,11 +57,11 @@ bun add better-auth-firestore firebase-admin better-auth
 
 ```ts
 import { firestoreAdapter } from "better-auth-firestore";
-import { createAuth } from "better-auth";
+import { betterAuth } from "better-auth";
 import { getFirestore } from "firebase-admin/firestore";
 
-export const auth = createAuth({
-  adapter: firestoreAdapter({ firestore: getFirestore() })
+export const auth = betterAuth({
+  database: firestoreAdapter({ firestore: getFirestore() })
 });
 ```
 
@@ -211,6 +211,17 @@ firestoreAdapter({
 
 ## Compatibility
 
+### Better Auth versions
+
+| Better Auth | Status | Notes |
+|---|---|---|
+| `^1.5.0` | ✅ Recommended | Uses the latest API and security fixes. |
+| `^1.4.18` | ✅ Supported | Backward-compatible for existing projects. |
+
+> **For older projects:** if your app still uses older Better Auth patterns (`createAuth` + `adapter`), this adapter remains compatible, but new projects should use `betterAuth` + `database`.
+
+### Runtime compatibility
+
 | Runtime | Supported | Notes |
 |---|---|---|
 | Node 18+ | ✅ | Recommended |
@@ -359,7 +370,7 @@ export const { GET, POST } = toNextJsHandler(auth);
 
 ```ts
 import { firestoreAdapter } from "better-auth-firestore";
-import { createAuth } from "better-auth";
+import { betterAuth } from "better-auth";
 import { initializeApp, cert } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 
@@ -371,8 +382,8 @@ const app = initializeApp({
   }),
 });
 
-export const auth = createAuth({
-  adapter: firestoreAdapter({ firestore: getFirestore(app) }),
+export const auth = betterAuth({
+  database: firestoreAdapter({ firestore: getFirestore(app) }),
 });
 ```
 

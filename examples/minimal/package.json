@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "better-auth-firestore": "^1.0.0",
-    "better-auth": "^1.4.18",
+    "better-auth": "^1.5.5",
     "firebase-admin": "^13.6.1",
     "next": "16.1.5",
     "react": "19.2.0",
