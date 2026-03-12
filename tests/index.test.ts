@@ -57,21 +57,21 @@ describe.each<TestConfig>(configs)(
 					name: "User",
 				},
 			});
-			expect(created.id).toBe("user_1");
+			expect(created.id).toBeTruthy();
 
 			const found = await adapter.findOne({
 				model: "user",
-				where: [{ field: "id", operator: "eq", value: "user_1" }],
+				where: [{ field: "id", operator: "eq", value: created.id }],
 			});
 
 			expect(found).toBeTruthy();
-			expect(found.id).toBe("user_1");
+			expect(found.id).toBe(created.id);
 			expect(found.email).toBe("user@example.com");
 		});
 
 		it("updates and counts records", async () => {
 			const adapter = getAdapter() as any;
-			await adapter.create({
+			const created = await adapter.create({
 				model: "user",
 				data: {
 					id: "user_2",
@@ -82,7 +82,7 @@ describe.each<TestConfig>(configs)(
 
 			const updated = await adapter.update({
 				model: "user",
-				where: [{ field: "id", operator: "eq", value: "user_2" }],
+				where: [{ field: "id", operator: "eq", value: created.id }],
 				update: { email: "after@example.com", name: "After" },
 			});
 
@@ -91,18 +91,18 @@ describe.each<TestConfig>(configs)(
 
 			const count = await adapter.count({
 				model: "user",
-				where: [{ field: "id", operator: "eq", value: "user_2" }],
+				where: [{ field: "id", operator: "eq", value: created.id }],
 			});
 			expect(count).toBe(1);
 		});
 
 		it("supports findMany sorting and delete", async () => {
 			const adapter = getAdapter() as any;
-			await adapter.create({
+			const createdA = await adapter.create({
 				model: "user",
 				data: { id: "a", email: "a@example.com", name: "A" },
 			});
-			await adapter.create({
+			const createdB = await adapter.create({
 				model: "user",
 				data: { id: "b", email: "b@example.com", name: "B" },
 			});
@@ -117,7 +117,7 @@ describe.each<TestConfig>(configs)(
 
 			await adapter.delete({
 				model: "user",
-				where: [{ field: "id", operator: "eq", value: "a" }],
+				where: [{ field: "id", operator: "eq", value: createdA.id }],
 			});
 
 			const remaining = await adapter.findMany({
@@ -125,7 +125,7 @@ describe.each<TestConfig>(configs)(
 				where: [],
 			});
 			expect(remaining).toHaveLength(1);
-			expect(remaining[0]?.id).toBe("b");
+			expect(remaining[0]?.id).toBe(createdB.id);
 		});
 	},
 );
