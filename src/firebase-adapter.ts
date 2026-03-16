@@ -4,8 +4,8 @@ import {
 } from "better-auth/adapters";
 import type { Firestore, Transaction } from "firebase-admin/firestore";
 import { FieldPath, Timestamp } from "firebase-admin/firestore";
-import { initFirestore } from "./firestore";
-import type { FirestoreAdapterConfig, NamingStrategy } from "./types";
+import { initFirestore } from "./firestore.js";
+import type { FirestoreAdapterConfig, NamingStrategy } from "./types.js";
 
 type CollectionsOverride = NonNullable<FirestoreAdapterConfig["collections"]>;
 
