@@ -102,7 +102,7 @@ pnpm lint:fix:unsafe
    pnpm test
    ```
 
-   > **Note:** For local testing, you may need to set up the Firestore Emulator. See the [README.md](./README.md#testing-with-firestore-emulator) for instructions.
+   > **Note:** For local testing, you may need to set up the Firestore Emulator. See the [README.md](./README.md#using-the-firestore-emulator) for instructions.
 
 5. Ensure all tests pass and the code is properly formatted
 6. Commit your changes with a descriptive message following this format:
@@ -156,9 +156,9 @@ pnpm test
 pnpm test --watch
 ```
 
-### Testing with Firestore Emulator
+### Using the Firestore Emulator
 
-For local development, you can use the Firestore Emulator. See the [README.md](./README.md#testing-with-firestore-emulator) for setup instructions.
+For local development and testing, you can use the Firestore Emulator. See the [README.md](./README.md#using-the-firestore-emulator) for setup instructions.
 
 ## Pull Request Process
 

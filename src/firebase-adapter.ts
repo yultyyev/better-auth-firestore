@@ -59,16 +59,13 @@ function resolveCollectionNames(
 	overrides?: CollectionsOverride,
 ) {
 	const snake = namingStrategy === "snake_case";
-	// Only suffix collection names in test mode (when using emulator) to isolate test suites
-	const isTestMode = Boolean(process.env.FIRESTORE_EMULATOR_HOST);
-	const suffix = isTestMode ? (snake ? "_snake" : "_default") : "";
 	return {
-		users: overrides?.users ?? `users${suffix}`,
-		sessions: overrides?.sessions ?? `sessions${suffix}`,
-		accounts: overrides?.accounts ?? `accounts${suffix}`,
+		users: overrides?.users ?? "users",
+		sessions: overrides?.sessions ?? "sessions",
+		accounts: overrides?.accounts ?? "accounts",
 		verificationTokens:
 			overrides?.verificationTokens ??
-			(snake ? `verification_tokens${suffix}` : `verificationTokens${suffix}`),
+			(snake ? "verification_tokens" : "verificationTokens"),
 	};
 }
 

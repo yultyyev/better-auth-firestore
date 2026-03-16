@@ -9,7 +9,7 @@
 **Firestore (Firebase Admin SDK) adapter for Better Auth.** A drop-in replacement for the Auth.js Firebase adapter with matching data shape.
 
 - **Install:** `pnpm add better-auth-firestore firebase-admin better-auth`
-- **Docs:** [Quickstart](#quick-start) • [Options](#options) • [Migration](#migration-from-authjsnextauth) • [Emulator](#testing-with-firestore-emulator)
+- **Docs:** [Quickstart](#quick-start) • [Options](#options) • [Migration](#migration-from-authjsnextauth) • [Emulator](#using-the-firestore-emulator)
 - **Example:** See [`/examples/minimal`](./examples/minimal) for a complete Next.js App Router example
 
 ---
@@ -387,16 +387,32 @@ export const auth = betterAuth({
 });
 ```
 
-## Testing with Firestore Emulator
+## Using the Firestore Emulator
+
+The adapter fully supports the Firestore Emulator for both **local development** and **testing**. When `FIRESTORE_EMULATOR_HOST` is set, the Firebase Admin SDK automatically routes all requests to the emulator instead of production Firestore. Collection names remain unchanged — the adapter uses the same collections in emulator mode as in production.
+
+### Local development
 
 ```bash
-# start emulator (example)
+# 1. Start the emulator
 docker run -d --rm \
 	--name auth-firestore \
 	-p 8080:8080 \
 	google/cloud-sdk:emulators gcloud beta emulators firestore start \
 	--host-port=0.0.0.0:8080
 
+# 2. Set the env var and start your app
+export FIRESTORE_EMULATOR_HOST=localhost:8080
+pnpm run dev
+```
+
+Or add `FIRESTORE_EMULATOR_HOST=localhost:8080` to your `.env` file (supported by Next.js, Vite, etc.).
+
+> **Note:** No credential or service account setup is needed when using the emulator — the Admin SDK skips authentication automatically.
+
+### Running tests
+
+```bash
 export FIRESTORE_EMULATOR_HOST=localhost:8080
 pnpm vitest run
 ```
@@ -417,7 +433,7 @@ privateKey: process.env.FIREBASE_PRIVATE_KEY!.replace(/\\n/g, "\n")
 
 **Symptom:** Firebase Admin SDK requests hang or time out during local development.
 
-**Fix:** Use the Firestore Emulator and set `FIRESTORE_EMULATOR_HOST=localhost:8080` before running your app. See [Testing with Firestore Emulator](#testing-with-firestore-emulator) for setup instructions.
+**Fix:** Use the Firestore Emulator and set `FIRESTORE_EMULATOR_HOST=localhost:8080` before running your app. See [Using the Firestore Emulator](#using-the-firestore-emulator) for setup instructions.
 
 ### Error: Missing or insufficient permissions / Index required
 
