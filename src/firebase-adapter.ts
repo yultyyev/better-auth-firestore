@@ -193,7 +193,9 @@ export interface FirestoreAdapterOptions
 	debugLogs?: DBAdapterDebugLogOption;
 }
 
-export const firestoreAdapter = (
+export const firestoreAdapter: (
+	config?: FirestoreAdapterOptions | Firestore,
+) => ReturnType<typeof createAdapterFactory> = (
 	config: FirestoreAdapterOptions | Firestore = {},
 ) => {
 	const db = resolveDb(config as any);
