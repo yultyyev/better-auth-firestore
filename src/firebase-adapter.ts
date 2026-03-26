@@ -714,10 +714,13 @@ export const firestoreAdapter: (
 										: [idCondition.value]
 								).filter((id): id is string => typeof id === "string");
 								if (debugLogs) {
-									console.log(`[Firestore Adapter] FINDMANY ${model} [using direct doc lookups for IDs]:`, {
-										where,
-										ids,
-									});
+									console.log(
+										`[Firestore Adapter] FINDMANY ${model} [using direct doc lookups for IDs]:`,
+										{
+											where,
+											ids,
+										},
+									);
 								}
 
 								// Fetch all documents by ID
@@ -773,9 +776,12 @@ export const firestoreAdapter: (
 							// Handle "notIn" operator with IDs
 							if (op === "notIn" || op === "not_in") {
 								if (debugLogs) {
-									console.log(`[Firestore Adapter] FINDMANY ${model} [handling notIn for IDs]:`, {
-										where,
-									});
+									console.log(
+										`[Firestore Adapter] FINDMANY ${model} [handling notIn for IDs]:`,
+										{
+											where,
+										},
+									);
 								}
 								// Get all documents, then filter out the excluded IDs
 								const excludedIds = Array.isArray(idCondition.value)

@@ -15,7 +15,7 @@ export function generateIndexSetupUrl(
 ): string {
 	// For protobuf, use the original format (keep (default) as-is)
 	const protobufDatabaseId = databaseId;
-	
+
 	// Construct the index resource path for protobuf
 	// Format: projects/{projectId}/databases/{databaseId}/collectionGroups/{collectionName}/indexes/
 	const indexPath = `projects/${projectId}/databases/${protobufDatabaseId}/collectionGroups/${collectionName}/indexes/`;
@@ -26,10 +26,10 @@ export function generateIndexSetupUrl(
 	const pathTag = Buffer.from([0x0a]); // Field 1, wire type 2
 	const pathLength = Buffer.from([indexPath.length]);
 	const pathData = Buffer.from(indexPath, "utf8");
-	
+
 	// Field 2 (tag 0x10, wire type 0): query scope (1 = COLLECTION)
 	const scopeTag = Buffer.from([0x10, 0x01]); // Field 2, value 1
-	
+
 	// Field 3 (tag 0x1a, wire type 2): fields array - identifier
 	const identifierField = Buffer.concat([
 		Buffer.from([0x1a, 0x0e]), // Field 3, length 14
@@ -37,7 +37,7 @@ export function generateIndexSetupUrl(
 		Buffer.from("identifier", "utf8"),
 		Buffer.from([0x10, 0x01]), // Nested field 2, value 1 (ASCENDING)
 	]);
-	
+
 	// Field 4 (tag 0x1a, wire type 2): fields array - createdAt
 	const createdAtField = Buffer.concat([
 		Buffer.from([0x1a, 0x0d]), // Field 3, length 13
@@ -45,7 +45,7 @@ export function generateIndexSetupUrl(
 		Buffer.from("createdAt", "utf8"),
 		Buffer.from([0x10, 0x02]), // Nested field 2, value 2 (DESCENDING)
 	]);
-	
+
 	// Field 5 (tag 0x1a, wire type 2): fields array - __name__
 	const nameField = Buffer.concat([
 		Buffer.from([0x1a, 0x0c]), // Field 3, length 12
@@ -53,7 +53,7 @@ export function generateIndexSetupUrl(
 		Buffer.from("__name__", "utf8"),
 		Buffer.from([0x10, 0x02]), // Nested field 2, value 2 (DESCENDING)
 	]);
-	
+
 	// Combine all parts
 	const protobuf = Buffer.concat([
 		pathTag,
@@ -71,7 +71,7 @@ export function generateIndexSetupUrl(
 	if (databaseId === "(default)") {
 		return `https://console.firebase.google.com/project/${projectId}/firestore/indexes?create_composite=${createComposite}`;
 	}
-	
+
 	// For custom databases, include the database path (convert (default) to -default- format)
 	const urlDatabaseId = databaseId === "(default)" ? "-default-" : databaseId;
 	return `https://console.firebase.google.com/project/${projectId}/firestore/databases/${urlDatabaseId}/indexes?create_composite=${createComposite}`;
@@ -106,4 +106,3 @@ export function getIndexConfig(collectionName: string = "verification") {
 		fieldOverrides: [],
 	};
 }
-
