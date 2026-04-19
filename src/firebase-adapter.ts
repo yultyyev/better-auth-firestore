@@ -43,6 +43,37 @@ type WhereCondition = {
 	connector?: "AND" | "OR";
 };
 
+/**
+ * Firestore caps the `IN` operator at 30 comparison values. When a `where`
+ * clause passes more than this, queries throw with
+ * `INVALID_ARGUMENT: 'IN' supports up to 30 comparison values.`
+ * We split oversized IN values into chunks of this size in both `deleteMany`
+ * and the regular `findMany` path and merge results.
+ * https://firebase.google.com/docs/firestore/query-data/queries#query_limitations
+ */
+const FIRESTORE_IN_CHUNK_SIZE = 30;
+
+type OversizedInClause = WhereCondition & {
+	operator: "in";
+	value: readonly unknown[];
+};
+
+/**
+ * Narrows a where clause to an `in` condition whose value array exceeds
+ * Firestore's 30-value cap. Used by `deleteMany` and `findMany` to trigger
+ * chunked sub-queries.
+ */
+function findOversizedInClause(
+	where: WhereCondition[] | undefined,
+): OversizedInClause | undefined {
+	return (where ?? []).find(
+		(w): w is OversizedInClause =>
+			w.operator === "in" &&
+			Array.isArray(w.value) &&
+			w.value.length > FIRESTORE_IN_CHUNK_SIZE,
+	);
+}
+
 function resolveDb(config?: FirestoreAdapterConfig | Firestore): Firestore {
 	if (!config) return initFirestore();
 	if ((config as Firestore).collection) return config as Firestore;
@@ -493,6 +524,36 @@ export const firestoreAdapter: (
 				},
 				deleteMany: async ({ model, where }) => {
 					const col = getCollectionRef(db, model, collections);
+					// Firestore's `IN` operator caps at 30 values. If a single where
+					// clause carries more than 30 values, split into sub-queries and
+					// sum the deletes so callers (e.g. better-auth's multi-session
+					// `deleteSessions(tokens)`) don't blow up once they cross the cap.
+					const oversized = findOversizedInClause(where);
+					if (oversized) {
+						let total = 0;
+						for (
+							let i = 0;
+							i < oversized.value.length;
+							i += FIRESTORE_IN_CHUNK_SIZE
+						) {
+							const chunk = oversized.value.slice(
+								i,
+								i + FIRESTORE_IN_CHUNK_SIZE,
+							);
+							const chunkedWhere = (where as WhereCondition[]).map((w) =>
+								w === oversized
+									? { ...w, value: chunk as WhereCondition["value"] }
+									: w,
+							);
+							const cq = applyWhereClause(col, chunkedWhere, mapper);
+							const csnap = await cq.get();
+							for (const d of csnap.docs) {
+								await d.ref.delete();
+								total++;
+							}
+						}
+						return total;
+					}
 					const q = applyWhereClause(col, where, mapper);
 					const snap = await q.get();
 					let count = 0;
@@ -958,6 +1019,64 @@ export const firestoreAdapter: (
 						if (offset) results = results.slice(offset);
 						if (limit) results = results.slice(0, limit);
 
+						return results as any[];
+					}
+
+					// Firestore's `IN` operator caps at 30 values. If a simple non-ID
+					// `in` query carries more than 30 values, split into chunks and
+					// merge the results. Any post-filter sort / offset / limit is
+					// re-applied after the merge to preserve the caller-visible
+					// ordering and pagination.
+					const oversizedIn = findOversizedInClause(where);
+					if (oversizedIn) {
+						const merged = new Map<string, any>();
+						for (
+							let i = 0;
+							i < oversizedIn.value.length;
+							i += FIRESTORE_IN_CHUNK_SIZE
+						) {
+							const chunk = oversizedIn.value.slice(
+								i,
+								i + FIRESTORE_IN_CHUNK_SIZE,
+							);
+							const chunkedWhere = (where as WhereCondition[]).map((w) =>
+								w === oversizedIn
+									? { ...w, value: chunk as WhereCondition["value"] }
+									: w,
+							);
+							let cq: FirebaseFirestore.Query = applyWhereClause(
+								col,
+								chunkedWhere,
+								mapper,
+							);
+							if (sortBy?.field) {
+								const fieldName = mapper.toDb(sortBy.field);
+								const direction = sortBy.direction === "desc" ? "desc" : "asc";
+								cq = cq.orderBy(fieldName, direction);
+							}
+							const csnap = await cq.get();
+							for (const d of csnap.docs) {
+								const data = d.data();
+								const result: Record<string, any> = { id: d.id };
+								for (const [k, v] of Object.entries(data)) {
+									result[mapper.fromDb(k)] = convertTimestamp(v);
+								}
+								merged.set(d.id, result);
+							}
+						}
+						let results = Array.from(merged.values());
+						if (sortBy?.field) {
+							results.sort((a, b) => {
+								const aVal = a[sortBy.field];
+								const bVal = b[sortBy.field];
+								const dir = sortBy.direction === "desc" ? -1 : 1;
+								if (aVal < bVal) return -1 * dir;
+								if (aVal > bVal) return 1 * dir;
+								return 0;
+							});
+						}
+						if (offset) results = results.slice(offset);
+						if (limit) results = results.slice(0, limit);
 						return results as any[];
 					}
 
