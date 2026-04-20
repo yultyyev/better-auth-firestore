@@ -199,6 +199,32 @@ describe.each<TestConfig>(
 		});
 		expect(remainingAfterDelete).toBe(34);
 	});
+
+	it("coerces session foreign keys to scalar ids on create", async () => {
+		const adapter = getAdapter() as any;
+		const userRef = db.collection(cfg.collections.users).doc("session_user_fk");
+		await userRef.set({
+			email: "session-user@example.com",
+			name: "Session User",
+		});
+
+		const created = await adapter.create({
+			model: "session",
+			data: {
+				userId: userRef,
+				expires: new Date("2030-01-01T00:00:00.000Z"),
+			},
+		});
+		expect(created.id).toBeTruthy();
+
+		const rawDoc = await db
+			.collection(cfg.collections.sessions)
+			.doc(created.id)
+			.get();
+		const rawData = rawDoc.data();
+		expect(rawData).toBeTruthy();
+		expect(Object.values(rawData ?? {})).toContain("session_user_fk");
+	});
 });
 
 describe("Emulator env does not alter default collection names", () => {

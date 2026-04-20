@@ -26,14 +26,31 @@ const MAP_FROM_FIRESTORE: Record<string, string | undefined> =
 
 const identity = <T>(x: T) => x;
 
+const DB_TO_CANONICAL_FIELD: Record<string, string> = {
+	user_id: "userId",
+	session_token: "sessionToken",
+	provider_account_id: "providerAccountId",
+	email_verified: "emailVerified",
+};
+
+function canonicalizeFieldName(field: string): string {
+	return DB_TO_CANONICAL_FIELD[field] ?? field;
+}
+
 function mapFieldsFactory(preferSnakeCase?: boolean): FieldMapper {
 	if (preferSnakeCase) {
 		return {
-			toDb: (field: string) => MAP_TO_FIRESTORE[field] ?? field,
+			toDb: (field: string) => {
+				const canonical = canonicalizeFieldName(field);
+				return MAP_TO_FIRESTORE[canonical] ?? canonical;
+			},
 			fromDb: (field: string) => MAP_FROM_FIRESTORE[field] ?? field,
 		};
 	}
-	return { toDb: identity, fromDb: identity } as FieldMapper;
+	return {
+		toDb: (field: string) => canonicalizeFieldName(field),
+		fromDb: (field: string) => MAP_FROM_FIRESTORE[field] ?? field,
+	} as FieldMapper;
 }
 
 type WhereCondition = {
@@ -236,6 +253,42 @@ function applyOperator(
 	}
 }
 
+function isDocumentReferenceLike(value: unknown): value is { id: string } {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"id" in value &&
+		typeof (value as { id: unknown }).id === "string" &&
+		"path" in value &&
+		typeof (value as { path: unknown }).path === "string"
+	);
+}
+
+function normalizeSessionWriteData(data: Record<string, any>): Record<string, any> {
+	const { user_id, session_token, ...rest } = data;
+	const normalized: Record<string, any> = { ...rest };
+
+	const userIdValue = normalized.userId ?? user_id;
+	if (typeof userIdValue === "string") {
+		normalized.userId = userIdValue;
+	} else if (isDocumentReferenceLike(userIdValue)) {
+		normalized.userId = userIdValue.id;
+	}
+
+	const sessionTokenValue = normalized.sessionToken ?? session_token;
+	if (typeof sessionTokenValue === "string") {
+		normalized.sessionToken = sessionTokenValue;
+	}
+
+	return normalized;
+}
+
+function normalizeWriteData(model: string, data: Record<string, any>): Record<string, any> {
+	const normalizedModel = model.toLowerCase().replace(/s$/, "");
+	if (normalizedModel !== "session") return data;
+	return normalizeSessionWriteData(data);
+}
+
 export interface FirestoreAdapterOptions
 	extends Omit<FirestoreAdapterConfig, "firestore"> {
 	firestore?: Firestore;
@@ -278,8 +331,9 @@ export const firestoreAdapter: (
 						create: async ({ model, data }: any) => {
 							const col = getCollectionRef(db, model, collections);
 							let ref = col.doc();
+							const normalizedData = normalizeWriteData(model, data);
 							const docData: any = {};
-							for (const [k, v] of Object.entries(data)) {
+							for (const [k, v] of Object.entries(normalizedData)) {
 								if (k === "id" && v) {
 									ref = col.doc(v as string);
 									continue;
@@ -287,7 +341,7 @@ export const firestoreAdapter: (
 								docData[mapper.toDb(k)] = v;
 							}
 							transaction.set(ref, docData);
-							return { ...data, id: ref.id };
+							return { ...normalizedData, id: ref.id };
 						},
 						update: async ({ model, where, update }: any) => {
 							const col = getCollectionRef(db, model, collections);
@@ -299,8 +353,9 @@ export const firestoreAdapter: (
 								if (doc) break;
 							}
 							if (!doc) return null;
+							const normalizedUpdate = normalizeWriteData(model, update);
 							const updateData: any = {};
-							for (const [k, v] of Object.entries(update)) {
+							for (const [k, v] of Object.entries(normalizedUpdate)) {
 								updateData[mapper.toDb(k)] = v;
 							}
 							transaction.update(doc.ref, updateData);
@@ -311,7 +366,7 @@ export const firestoreAdapter: (
 									result[mapper.fromDb(k)] = v;
 								}
 							}
-							return { ...result, ...update };
+							return { ...result, ...normalizedUpdate };
 						},
 						findOne: async ({ model, where }: any) => {
 							const col = getCollectionRef(db, model, collections);
@@ -341,8 +396,12 @@ export const firestoreAdapter: (
 				create: async ({ model, data }) => {
 					const col = getCollectionRef(db, model, collections);
 					let ref = col.doc();
+					const normalizedData = normalizeWriteData(
+						model,
+						data as Record<string, any>,
+					);
 					const docData: any = {};
-					for (const [k, v] of Object.entries(data)) {
+					for (const [k, v] of Object.entries(normalizedData)) {
 						if (k === "id" && v) {
 							ref = col.doc(v as string);
 							continue;
@@ -393,14 +452,18 @@ export const firestoreAdapter: (
 					}
 					if (debugLogs) {
 						console.log(`[Firestore Adapter] CREATE ${model} - returning:`, {
-							...data,
+							...normalizedData,
 							...result,
 						});
 					}
-					return { ...data, ...result };
+					return { ...normalizedData, ...result };
 				},
 				update: async ({ model, where, update }) => {
 					const col = getCollectionRef(db, model, collections);
+					const normalizedUpdate = normalizeWriteData(
+						model,
+						update as Record<string, any>,
+					);
 
 					// Special case: if where clause is just "id eq value", use doc() instead of query
 					if (
@@ -430,7 +493,7 @@ export const firestoreAdapter: (
 
 						const updateData: any = {};
 						for (const [k, v] of Object.entries(
-							update as Record<string, any>,
+							normalizedUpdate as Record<string, any>,
 						)) {
 							updateData[mapper.toDb(k)] = v;
 						}
@@ -483,7 +546,9 @@ export const firestoreAdapter: (
 					}
 
 					const updateData: any = {};
-					for (const [k, v] of Object.entries(update as Record<string, any>)) {
+					for (const [k, v] of Object.entries(
+						normalizedUpdate as Record<string, any>,
+					)) {
 						updateData[mapper.toDb(k)] = v;
 					}
 					if (debugLogs) {
@@ -514,8 +579,12 @@ export const firestoreAdapter: (
 					const col = getCollectionRef(db, model, collections);
 					let count = 0;
 					const seenDocIds = new Set<string>();
+					const normalizedUpdate = normalizeWriteData(
+						model,
+						update as Record<string, any>,
+					);
 					const updateData: any = {};
-					for (const [k, v] of Object.entries(update)) {
+					for (const [k, v] of Object.entries(normalizedUpdate)) {
 						updateData[mapper.toDb(k)] = v;
 					}
 					for (const whereClause of getChunkedWhereClauses(where)) {
