@@ -60,8 +60,8 @@ type OversizedInClause = WhereCondition & {
 
 /**
  * Narrows a where clause to an `in` condition whose value array exceeds
- * Firestore's 30-value cap. Used by `deleteMany` and `findMany` to trigger
- * chunked sub-queries.
+ * Firestore's 30-value cap. Used by query methods to trigger chunked
+ * sub-queries.
  */
 function findOversizedInClause(
 	where: WhereCondition[] | undefined,
@@ -72,6 +72,27 @@ function findOversizedInClause(
 			Array.isArray(w.value) &&
 			w.value.length > FIRESTORE_IN_CHUNK_SIZE,
 	);
+}
+
+function getChunkedWhereClauses(
+	where: WhereCondition[] | undefined,
+): (WhereCondition[] | undefined)[] {
+	const oversized = findOversizedInClause(where);
+	if (!oversized || !where) {
+		return [where];
+	}
+
+	const chunkedClauses: WhereCondition[][] = [];
+	for (let i = 0; i < oversized.value.length; i += FIRESTORE_IN_CHUNK_SIZE) {
+		const chunk = oversized.value.slice(i, i + FIRESTORE_IN_CHUNK_SIZE);
+		chunkedClauses.push(
+			where.map((w) =>
+				w === oversized ? { ...w, value: chunk as WhereCondition["value"] } : w,
+			),
+		);
+	}
+
+	return chunkedClauses;
 }
 
 function resolveDb(config?: FirestoreAdapterConfig | Firestore): Firestore {
@@ -270,9 +291,13 @@ export const firestoreAdapter: (
 						},
 						update: async ({ model, where, update }: any) => {
 							const col = getCollectionRef(db, model, collections);
-							const q = applyWhereClause(col, where, mapper);
-							const snap = await transaction.get(q.limit(1));
-							const doc = snap.docs[0];
+							let doc: FirebaseFirestore.QueryDocumentSnapshot | undefined;
+							for (const whereClause of getChunkedWhereClauses(where)) {
+								const q = applyWhereClause(col, whereClause, mapper);
+								const snap = await transaction.get(q.limit(1));
+								doc = snap.docs[0];
+								if (doc) break;
+							}
 							if (!doc) return null;
 							const updateData: any = {};
 							for (const [k, v] of Object.entries(update)) {
@@ -290,9 +315,13 @@ export const firestoreAdapter: (
 						},
 						findOne: async ({ model, where }: any) => {
 							const col = getCollectionRef(db, model, collections);
-							const q = applyWhereClause(col, where, mapper);
-							const snap = await transaction.get(q.limit(1));
-							const doc = snap.docs[0];
+							let doc: FirebaseFirestore.QueryDocumentSnapshot | undefined;
+							for (const whereClause of getChunkedWhereClauses(where)) {
+								const q = applyWhereClause(col, whereClause, mapper);
+								const snap = await transaction.get(q.limit(1));
+								doc = snap.docs[0];
+								if (doc) break;
+							}
 							if (!doc) return null;
 							const data = doc.data();
 							if (!data) return null;
@@ -430,7 +459,6 @@ export const firestoreAdapter: (
 						return result;
 					}
 
-					const q = applyWhereClause(col, where, mapper);
 					if (debugLogs) {
 						console.log(`[Firestore Adapter] UPDATE ${model}:`, {
 							where,
@@ -438,8 +466,13 @@ export const firestoreAdapter: (
 							collection: collections,
 						});
 					}
-					const snap = await q.limit(1).get();
-					const doc = snap.docs[0];
+					let doc: FirebaseFirestore.QueryDocumentSnapshot | undefined;
+					for (const whereClause of getChunkedWhereClauses(where)) {
+						const q = applyWhereClause(col, whereClause, mapper);
+						const snap = await q.limit(1).get();
+						doc = snap.docs[0];
+						if (doc) break;
+					}
 					if (!doc) {
 						if (debugLogs) {
 							console.log(
@@ -479,16 +512,21 @@ export const firestoreAdapter: (
 				},
 				updateMany: async ({ model, where, update }) => {
 					const col = getCollectionRef(db, model, collections);
-					const q = applyWhereClause(col, where, mapper);
-					const snap = await q.get();
 					let count = 0;
+					const seenDocIds = new Set<string>();
 					const updateData: any = {};
 					for (const [k, v] of Object.entries(update)) {
 						updateData[mapper.toDb(k)] = v;
 					}
-					for (const d of snap.docs) {
-						await d.ref.update(updateData);
-						count++;
+					for (const whereClause of getChunkedWhereClauses(where)) {
+						const q = applyWhereClause(col, whereClause, mapper);
+						const snap = await q.get();
+						for (const d of snap.docs) {
+							if (seenDocIds.has(d.id)) continue;
+							seenDocIds.add(d.id);
+							await d.ref.update(updateData);
+							count++;
+						}
 					}
 					return count;
 				},
@@ -517,9 +555,13 @@ export const firestoreAdapter: (
 						return;
 					}
 
-					const q = applyWhereClause(col, where, mapper);
-					const snap = await q.limit(1).get();
-					const doc = snap.docs[0];
+					let doc: FirebaseFirestore.QueryDocumentSnapshot | undefined;
+					for (const whereClause of getChunkedWhereClauses(where)) {
+						const q = applyWhereClause(col, whereClause, mapper);
+						const snap = await q.limit(1).get();
+						doc = snap.docs[0];
+						if (doc) break;
+					}
 					if (doc) await doc.ref.delete();
 				},
 				deleteMany: async ({ model, where }) => {
@@ -664,7 +706,6 @@ export const firestoreAdapter: (
 						return result;
 					}
 
-					const q = applyWhereClause(col, where, mapper);
 					if (debugLogs) {
 						console.log(`[Firestore Adapter] FINDONE ${model}:`, {
 							where,
@@ -672,16 +713,25 @@ export const firestoreAdapter: (
 							collection: collections,
 						});
 					}
-					const snap = await q.limit(1).get();
+					let snapshotSize = 0;
+					let snapshotDocsLength = 0;
+					let doc: FirebaseFirestore.QueryDocumentSnapshot | undefined;
+					for (const whereClause of getChunkedWhereClauses(where)) {
+						const q = applyWhereClause(col, whereClause, mapper);
+						const snap = await q.limit(1).get();
+						snapshotSize = snap.size;
+						snapshotDocsLength = snap.docs.length;
+						doc = snap.docs[0];
+						if (doc) break;
+					}
 					if (debugLogs) {
 						console.log(
 							`[Firestore Adapter] FINDONE ${model} - snapshot size:`,
-							snap.size,
+							snapshotSize,
 							"docs:",
-							snap.docs.length,
+							snapshotDocsLength,
 						);
 					}
-					const doc = snap.docs[0];
 					if (!doc || !doc.exists) {
 						if (debugLogs) {
 							console.log(
@@ -1259,26 +1309,34 @@ export const firestoreAdapter: (
 						}
 					}
 
-					let q: FirebaseFirestore.Query = applyWhereClause(col, where, mapper);
-
 					const notInCondition = where?.find(
 						(w) =>
 							(w.operator as string) === "notIn" ||
 							(w.operator as string) === "not_in",
 					);
-					if (notInCondition) {
-						const snap = await q.get();
-						const fieldName = notInCondition.field;
-						const arr = Array.isArray(notInCondition.value)
-							? notInCondition.value
-							: [notInCondition.value];
-						return snap.docs.filter((d) => {
-							const data = d.data();
-							const value = data[mapper.toDb(fieldName)];
-							return !arr.includes(value);
-						}).length;
+					const whereClauses = getChunkedWhereClauses(where);
+					if (notInCondition || whereClauses.length > 1) {
+						const matchingIds = new Set<string>();
+						for (const whereClause of whereClauses) {
+							const q = applyWhereClause(col, whereClause, mapper);
+							const snap = await q.get();
+							for (const d of snap.docs) {
+								if (notInCondition) {
+									const fieldName = notInCondition.field;
+									const arr = Array.isArray(notInCondition.value)
+										? notInCondition.value
+										: [notInCondition.value];
+									const data = d.data();
+									const value = data[mapper.toDb(fieldName)];
+									if (arr.includes(value)) continue;
+								}
+								matchingIds.add(d.id);
+							}
+						}
+						return matchingIds.size;
 					}
 
+					const q: FirebaseFirestore.Query = applyWhereClause(col, where, mapper);
 					const snap = await q.count().get();
 					return snap.data().count ?? 0;
 				},

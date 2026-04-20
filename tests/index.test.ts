@@ -141,6 +141,64 @@ describe.each<TestConfig>(
 		expect(remaining).toHaveLength(1);
 		expect(remaining[0]?.id).toBe(createdB.id);
 	});
+
+	it("handles oversized non-ID in clauses across CRUD methods", async () => {
+		const adapter = getAdapter() as any;
+		const oversizedEmails = Array.from(
+			{ length: 35 },
+			(_, index) => `bulk_${index}@example.com`,
+		);
+
+		for (const [index, email] of oversizedEmails.entries()) {
+			await adapter.create({
+				model: "user",
+				data: {
+					id: `bulk_${index}`,
+					email,
+					name: `Bulk ${index}`,
+				},
+			});
+		}
+
+		const foundOne = await adapter.findOne({
+			model: "user",
+			where: [{ field: "email", operator: "in", value: oversizedEmails }],
+		});
+		expect(foundOne).toBeTruthy();
+		expect(oversizedEmails).toContain(foundOne.email);
+
+		const updated = await adapter.update({
+			model: "user",
+			where: [{ field: "email", operator: "in", value: oversizedEmails }],
+			update: { name: "single-updated" },
+		});
+		expect(updated).toBeTruthy();
+		expect(updated.name).toBe("single-updated");
+
+		const updateManyCount = await adapter.updateMany({
+			model: "user",
+			where: [{ field: "email", operator: "in", value: oversizedEmails }],
+			update: { name: "bulk-updated" },
+		});
+		expect(updateManyCount).toBe(35);
+
+		const count = await adapter.count({
+			model: "user",
+			where: [{ field: "email", operator: "in", value: oversizedEmails }],
+		});
+		expect(count).toBe(35);
+
+		await adapter.delete({
+			model: "user",
+			where: [{ field: "email", operator: "in", value: oversizedEmails }],
+		});
+
+		const remainingAfterDelete = await adapter.count({
+			model: "user",
+			where: [{ field: "email", operator: "in", value: oversizedEmails }],
+		});
+		expect(remainingAfterDelete).toBe(34);
+	});
 });
 
 describe("Emulator env does not alter default collection names", () => {
