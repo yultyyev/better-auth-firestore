@@ -448,6 +448,24 @@ const url = generateIndexSetupUrl(process.env.FIREBASE_PROJECT_ID!);
 console.log(url); // Open this URL to create the index
 ```
 
+## FAQ
+
+### Can I migrate from Auth.js / NextAuth without changing existing Firestore data?
+
+Yes. `better-auth-firestore` is designed as a drop-in replacement for the Auth.js Firebase adapter with matching collection names and field shapes by default, so most projects do not need a Firestore data migration. See [Migration from Auth.js/NextAuth](#migration-from-authjsnextauth) for the adapter-specific details.
+
+### What's the difference between `better-auth-firestore` and `better-auth-firebase-auth`?
+
+`better-auth-firestore` is a database adapter for storing Better Auth users, sessions, accounts, and verification tokens in Firestore through the Firebase Admin SDK. `better-auth-firebase-auth` is for Firebase Authentication provider integration such as Email/Password, Google sign-in, client/server token generation, and password reset flows. Use the Firestore adapter for data storage and the Firebase Auth plugin when you need Firebase Authentication features.
+
+### Which runtimes are supported?
+
+This package supports server-side Node.js runtimes, including Next.js route handlers, Cloud Functions, and Cloud Run, anywhere the Firebase Admin SDK is supported. Edge runtimes such as Vercel Edge Functions and Cloudflare Workers are not supported because the Firestore Admin SDK does not run there. See [Runtime compatibility](#runtime-compatibility) for the current matrix.
+
+### Why is a Firestore composite index required for verification tokens?
+
+Better Auth verification token lookups require a Firestore query pattern that depends on a composite index. Without that index, verification-related queries can fail with a missing index error or insufficient permissions message. See [Create Required Firestore Index](#3-create-required-firestore-index) for the exact fields and setup options.
+
 ## Related Links
 
 - [Better Auth Documentation](https://www.better-auth.com/docs)
