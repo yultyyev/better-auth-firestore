@@ -168,7 +168,7 @@ For local development and testing, you can use the Firestore Emulator. See the [
 4. Update documentation as needed
 5. Keep your PR focused on a single feature or bug fix
 6. Be responsive to code review feedback
-7. The project uses semantic-release, so changelog updates are handled automatically based on commit messages
+7. The project uses semantic-release: version bumps follow **commits on `main`** (for **squash merge**, your **PR title** is usually that commit). See [.github/RELEASE.md](./.github/RELEASE.md) for patch / minor / major / no-release and `chore(deps)` / `chore(security)` rules.
 
 ## Code Style
 
