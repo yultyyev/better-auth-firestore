@@ -200,6 +200,44 @@ describe.each<TestConfig>(
 		expect(remainingAfterDelete).toBe(34);
 	});
 
+	it("drops undefined fields on create and update without erroring", async () => {
+		// Firestore's Admin SDK rejects writes containing `undefined` unless
+		// `ignoreUndefinedProperties: true` is set on the client. better-auth
+		// routinely emits optional-undefined fields (e.g. `image` on
+		// email/password sign-up); the adapter must strip them so the write
+		// goes through cleanly with any user-supplied Firestore instance.
+		const adapter = getAdapter() as any;
+
+		// Note: better-auth's adapter wrapper strips client-supplied `id` and
+		// generates its own, so we don't pass one here.
+		const created = await adapter.create({
+			model: "user",
+			data: {
+				email: "undef@example.com",
+				name: "Undef",
+				image: undefined,
+			},
+		});
+		expect(created.id).toBeTruthy();
+
+		const found = await adapter.findOne({
+			model: "user",
+			where: [{ field: "id", operator: "eq", value: created.id }],
+		});
+		expect(found).toBeTruthy();
+		expect(found.email).toBe("undef@example.com");
+		// undefined fields should not have been persisted
+		expect(found.image).toBeUndefined();
+
+		const updated = await adapter.update({
+			model: "user",
+			where: [{ field: "id", operator: "eq", value: created.id }],
+			update: { name: "Undef2", image: undefined },
+		});
+		expect(updated).toBeTruthy();
+		expect(updated.name).toBe("Undef2");
+	});
+
 	it("coerces session foreign keys to scalar ids on create", async () => {
 		const adapter = getAdapter() as any;
 		const userRef = db.collection(cfg.collections.users).doc("session_user_fk");
