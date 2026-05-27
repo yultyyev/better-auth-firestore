@@ -289,6 +289,41 @@ function normalizeWriteData(model: string, data: Record<string, any>): Record<st
 	return normalizeSessionWriteData(data);
 }
 
+/**
+ * Build a Firestore-safe write payload from a normalized data object.
+ *
+ * - Maps app field names to their Firestore-side names via `mapper`.
+ * - Skips `undefined` values. The Firestore Admin SDK rejects writes that
+ *   contain `undefined` unless the client was initialized with
+ *   `ignoreUndefinedProperties: true`, and better-auth routinely emits
+ *   optional-undefined fields (e.g. `image` on email/password sign-up).
+ *   Stripping here lets the adapter work with any user-supplied Firestore
+ *   instance, not just ones we initialize.
+ * - Routes a string `id` field out as `idOverride` so create callers can
+ *   set it on the document reference instead of writing it into the body.
+ *   For updates the caller can simply ignore `idOverride` — you cannot
+ *   change a Firestore document ID by writing to a field.
+ *
+ * `null` is preserved deliberately: Firestore accepts null and callers may
+ * use it to explicitly clear a field.
+ */
+function buildFirestoreWriteData(
+	data: Record<string, any>,
+	mapper: FieldMapper,
+): { docData: Record<string, any>; idOverride: string | undefined } {
+	const docData: Record<string, any> = {};
+	let idOverride: string | undefined;
+	for (const [k, v] of Object.entries(data)) {
+		if (v === undefined) continue;
+		if (k === "id") {
+			if (typeof v === "string" && v) idOverride = v;
+			continue;
+		}
+		docData[mapper.toDb(k)] = v;
+	}
+	return { docData, idOverride };
+}
+
 export interface FirestoreAdapterOptions
 	extends Omit<FirestoreAdapterConfig, "firestore"> {
 	firestore?: Firestore;
@@ -330,16 +365,12 @@ export const firestoreAdapter: (
 					const txAdapter = {
 						create: async ({ model, data }: any) => {
 							const col = getCollectionRef(db, model, collections);
-							let ref = col.doc();
 							const normalizedData = normalizeWriteData(model, data);
-							const docData: any = {};
-							for (const [k, v] of Object.entries(normalizedData)) {
-								if (k === "id" && v) {
-									ref = col.doc(v as string);
-									continue;
-								}
-								docData[mapper.toDb(k)] = v;
-							}
+							const { docData, idOverride } = buildFirestoreWriteData(
+								normalizedData,
+								mapper,
+							);
+							const ref = idOverride ? col.doc(idOverride) : col.doc();
 							transaction.set(ref, docData);
 							return { ...normalizedData, id: ref.id };
 						},
@@ -354,10 +385,10 @@ export const firestoreAdapter: (
 							}
 							if (!doc) return null;
 							const normalizedUpdate = normalizeWriteData(model, update);
-							const updateData: any = {};
-							for (const [k, v] of Object.entries(normalizedUpdate)) {
-								updateData[mapper.toDb(k)] = v;
-							}
+							const { docData: updateData } = buildFirestoreWriteData(
+								normalizedUpdate,
+								mapper,
+							);
 							transaction.update(doc.ref, updateData);
 							const existing = doc.data();
 							const result: any = { id: doc.id };
@@ -395,19 +426,15 @@ export const firestoreAdapter: (
 			return {
 				create: async ({ model, data }) => {
 					const col = getCollectionRef(db, model, collections);
-					let ref = col.doc();
 					const normalizedData = normalizeWriteData(
 						model,
 						data as Record<string, any>,
 					);
-					const docData: any = {};
-					for (const [k, v] of Object.entries(normalizedData)) {
-						if (k === "id" && v) {
-							ref = col.doc(v as string);
-							continue;
-						}
-						docData[mapper.toDb(k)] = v;
-					}
+					const { docData, idOverride } = buildFirestoreWriteData(
+						normalizedData,
+						mapper,
+					);
+					const ref = idOverride ? col.doc(idOverride) : col.doc();
 					if (debugLogs) {
 						console.log(`[Firestore Adapter] CREATE ${model}:`, {
 							input: data,
@@ -491,12 +518,10 @@ export const firestoreAdapter: (
 							return null as any;
 						}
 
-						const updateData: any = {};
-						for (const [k, v] of Object.entries(
+						const { docData: updateData } = buildFirestoreWriteData(
 							normalizedUpdate as Record<string, any>,
-						)) {
-							updateData[mapper.toDb(k)] = v;
-						}
+							mapper,
+						);
 						if (debugLogs) {
 							console.log(
 								`[Firestore Adapter] UPDATE ${model} - updateData:`,
@@ -545,12 +570,10 @@ export const firestoreAdapter: (
 						return null as any;
 					}
 
-					const updateData: any = {};
-					for (const [k, v] of Object.entries(
+					const { docData: updateData } = buildFirestoreWriteData(
 						normalizedUpdate as Record<string, any>,
-					)) {
-						updateData[mapper.toDb(k)] = v;
-					}
+						mapper,
+					);
 					if (debugLogs) {
 						console.log(
 							`[Firestore Adapter] UPDATE ${model} - updateData:`,
@@ -583,10 +606,10 @@ export const firestoreAdapter: (
 						model,
 						update as Record<string, any>,
 					);
-					const updateData: any = {};
-					for (const [k, v] of Object.entries(normalizedUpdate)) {
-						updateData[mapper.toDb(k)] = v;
-					}
+					const { docData: updateData } = buildFirestoreWriteData(
+						normalizedUpdate,
+						mapper,
+					);
 					for (const whereClause of getChunkedWhereClauses(where)) {
 						const q = applyWhereClause(col, whereClause, mapper);
 						const snap = await q.get();
