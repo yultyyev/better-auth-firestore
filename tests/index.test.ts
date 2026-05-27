@@ -347,3 +347,191 @@ describe("Emulator env does not alter default collection names", () => {
 		}
 	});
 });
+
+describe("Transaction buffering (regression for #24)", () => {
+	// All tests in this block use the same db + collection set. The tx
+	// wrapper doesn't branch on naming strategy, so we only need to cover
+	// one configuration here.
+	const db = initFirestore({ name: "test-tx", projectId: "test" });
+	const TX_COLLECTIONS = {
+		users: "tx_users",
+		sessions: "tx_sessions",
+		accounts: "tx_accounts",
+		verificationTokens: "tx_verificationTokens",
+	};
+	const adapter = firestoreAdapter({
+		firestore: db,
+		collections: TX_COLLECTIONS,
+		debugLogs: false,
+	})({}) as any;
+
+	afterEach(async () => {
+		for (const col of Object.values(TX_COLLECTIONS)) {
+			const snap = await db.collection(col).get();
+			await Promise.all(snap.docs.map((d) => d.ref.delete()));
+		}
+	});
+
+	it("commits a create inside a transaction (the bare #24 trigger)", async () => {
+		// Before the buffer refactor, this worked — only one Firestore op —
+		// but it sets the baseline.
+		const result = await adapter.transaction(async (tx: any) => {
+			return tx.create({
+				model: "user",
+				data: { email: "tx1@example.com", name: "T1" },
+			});
+		});
+		expect(result.id).toBeTruthy();
+
+		const found = await adapter.findOne({
+			model: "user",
+			where: [{ field: "id", operator: "eq", value: result.id }],
+		});
+		expect(found.email).toBe("tx1@example.com");
+	});
+
+	it("findOne after create returns the buffered doc (read-your-writes by id)", async () => {
+		const observed = await adapter.transaction(async (tx: any) => {
+			const created = await tx.create({
+				model: "user",
+				data: { email: "tx2@example.com", name: "T2" },
+			});
+			return tx.findOne({
+				model: "user",
+				where: [{ field: "id", operator: "eq", value: created.id }],
+			});
+		});
+		expect(observed).toBeTruthy();
+		expect(observed.email).toBe("tx2@example.com");
+	});
+
+	it("findOne after create overlays by non-id field too", async () => {
+		const observed = await adapter.transaction(async (tx: any) => {
+			await tx.create({
+				model: "user",
+				data: { email: "tx3@example.com", name: "T3" },
+			});
+			return tx.findOne({
+				model: "user",
+				where: [
+					{ field: "email", operator: "eq", value: "tx3@example.com" },
+				],
+			});
+		});
+		expect(observed).toBeTruthy();
+		expect(observed.name).toBe("T3");
+	});
+
+	it("create + update on the same buffered doc collapses to a single set on flush", async () => {
+		const observed = await adapter.transaction(async (tx: any) => {
+			const created = await tx.create({
+				model: "user",
+				data: { email: "tx4@example.com", name: "Original" },
+			});
+			return tx.update({
+				model: "user",
+				where: [{ field: "id", operator: "eq", value: created.id }],
+				update: { name: "Modified" },
+			});
+		});
+		expect(observed.name).toBe("Modified");
+		expect(observed.email).toBe("tx4@example.com");
+
+		// Persisted state reflects the merged write
+		const persisted = await adapter.findOne({
+			model: "user",
+			where: [{ field: "id", operator: "eq", value: observed.id }],
+		});
+		expect(persisted.name).toBe("Modified");
+		expect(persisted.email).toBe("tx4@example.com");
+	});
+
+	it("update + update on the same Firestore-resident doc merges into one update", async () => {
+		const seedRef = db.collection(TX_COLLECTIONS.users).doc();
+		await seedRef.set({ email: "tx5@example.com", name: "Seed" });
+
+		await adapter.transaction(async (tx: any) => {
+			await tx.update({
+				model: "user",
+				where: [{ field: "id", operator: "eq", value: seedRef.id }],
+				update: { name: "Update1" },
+			});
+			await tx.update({
+				model: "user",
+				where: [{ field: "id", operator: "eq", value: seedRef.id }],
+				update: { name: "Update2" },
+			});
+		});
+
+		const persisted = await seedRef.get();
+		expect(persisted.data()?.name).toBe("Update2");
+		// Email from the seed should survive — update is partial, not replace
+		expect(persisted.data()?.email).toBe("tx5@example.com");
+	});
+
+	it("findOne after update returns the merged state, not the pre-update snapshot", async () => {
+		const seedRef = db.collection(TX_COLLECTIONS.users).doc();
+		await seedRef.set({ email: "tx6@example.com", name: "Seed" });
+
+		const observed = await adapter.transaction(async (tx: any) => {
+			await tx.update({
+				model: "user",
+				where: [{ field: "id", operator: "eq", value: seedRef.id }],
+				update: { name: "Modified" },
+			});
+			return tx.findOne({
+				model: "user",
+				where: [{ field: "id", operator: "eq", value: seedRef.id }],
+			});
+		});
+		expect(observed.name).toBe("Modified");
+		expect(observed.email).toBe("tx6@example.com");
+	});
+
+	it("create(user) → findOne(session)[null] → create(session) — the actual #24 pattern", async () => {
+		// This is the exact interleaving that triggered #24 once
+		// secondaryStorage was wired in. With buffered writes, the findOne
+		// runs first against Firestore (no writes flushed yet) and the two
+		// creates flush after the callback resolves.
+		await adapter.transaction(async (tx: any) => {
+			const u = await tx.create({
+				model: "user",
+				data: { email: "tx7@example.com", name: "U" },
+			});
+
+			const existing = await tx.findOne({
+				model: "session",
+				where: [{ field: "userId", operator: "eq", value: u.id }],
+			});
+			expect(existing).toBeNull();
+
+			await tx.create({
+				model: "session",
+				data: {
+					userId: u.id,
+					expires: new Date("2030-01-01T00:00:00.000Z"),
+				},
+			});
+		});
+
+		const users = await db.collection(TX_COLLECTIONS.users).get();
+		const sessions = await db.collection(TX_COLLECTIONS.sessions).get();
+		expect(users.size).toBe(1);
+		expect(sessions.size).toBe(1);
+	});
+
+	it("throwing inside the callback aborts the transaction (no partial writes)", async () => {
+		await expect(
+			adapter.transaction(async (tx: any) => {
+				await tx.create({
+					model: "user",
+					data: { email: "tx8@example.com", name: "Aborted" },
+				});
+				throw new Error("intentional");
+			}),
+		).rejects.toThrow("intentional");
+
+		const users = await db.collection(TX_COLLECTIONS.users).get();
+		expect(users.size).toBe(0);
+	});
+});

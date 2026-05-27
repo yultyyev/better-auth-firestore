@@ -19,7 +19,7 @@ async function clearAll(db: Firestore) {
 	}
 }
 
-describe("better-auth with Firestore secondaryStorage (repro for #24)", () => {
+describe("better-auth with Firestore secondaryStorage (regression for #24)", () => {
 	const db = initFirestore({ name: "test-ss", projectId: "test" });
 
 	const auth = betterAuth({
@@ -42,30 +42,25 @@ describe("better-auth with Firestore secondaryStorage (repro for #24)", () => {
 		await clearAll(db);
 	});
 
-	// `it.fails` until #24 is resolved: today better-auth's signUpEmail calls
-	// `createSession` (which does a `findOne` read) inside the same transaction
-	// where `create(user)` has already done a `transaction.set` — Firestore
-	// rejects with "transactions require all reads to be executed before all
-	// writes." When the tx wrapper is refactored to buffer writes and overlay
-	// reads, this test will start passing and `it.fails` will itself fail,
-	// signaling that the modifier should be removed.
-	it.fails(
-		"signs up and signs in without violating Firestore txn read-before-write",
-		async () => {
-			const email = `u-${Date.now()}@example.com`;
-			const password = "password1234";
+	// The tx wrapper buffers writes during the user callback and flushes them
+	// after the callback resolves, so Firestore's "all reads before all writes"
+	// rule is honored even when better-auth interleaves create + findOne +
+	// create inside one transaction (as `signUpEmail` does once
+	// `secondaryStorage` is configured).
+	it("signs up and signs in without violating Firestore txn read-before-write", async () => {
+		const email = `u-${Date.now()}@example.com`;
+		const password = "password1234";
 
-			const signUp = await auth.api.signUpEmail({
-				body: { email, password, name: "Repro User" },
-				asResponse: true,
-			});
-			expect(signUp.status).toBe(200);
+		const signUp = await auth.api.signUpEmail({
+			body: { email, password, name: "Repro User" },
+			asResponse: true,
+		});
+		expect(signUp.status).toBe(200);
 
-			const signIn = await auth.api.signInEmail({
-				body: { email, password },
-				asResponse: true,
-			});
-			expect(signIn.status).toBe(200);
-		},
-	);
+		const signIn = await auth.api.signInEmail({
+			body: { email, password },
+			asResponse: true,
+		});
+		expect(signIn.status).toBe(200);
+	});
 });

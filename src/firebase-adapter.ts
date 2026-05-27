@@ -324,6 +324,246 @@ function buildFirestoreWriteData(
 	return { docData, idOverride };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Transaction write buffer (per-transaction)
+// ─────────────────────────────────────────────────────────────────────────────
+// Firestore requires every `transaction.get` to complete before any
+// `transaction.set` / `update` / `delete`. Better-auth interleaves them
+// freely — a typical sign-up runs `create(user)` → `findOne(session)` →
+// `create(session)` inside one transaction. We satisfy Firestore's rule by
+// deferring every staged write until after the user callback resolves;
+// reads in the meantime overlay matching buffered docs so the callback
+// observes its own writes (transactional read-your-writes semantics).
+//
+// Operations also merge in place: `create` + `update` on the same ref
+// collapses to a single `set` at flush time, and `update` + `update`
+// collapses to a single merged `update`. The buffer is constructed inside
+// `runTransaction`, so Firestore's automatic retries on contention get a
+// fresh buffer each pass.
+//
+// Read overlay is best-effort: `matchesWhere` covers the operators
+// better-auth uses inside transactions (eq, ne, in, notIn, gt(e), lt(e),
+// contains, startsWith, endsWith, plus AND/OR connectors). Exotic
+// operators fall through to a real `transaction.get`, which won't see
+// buffered docs of the same model — in practice better-auth never
+// generates such clauses inside its tx callbacks.
+
+type TxBufferOp = "create" | "update";
+
+interface TxBufferEntry {
+	op: TxBufferOp;
+	model: string;
+	ref: FirebaseFirestore.DocumentReference;
+	/**
+	 * Payload for flushing: full doc body (create) or update mask (update).
+	 * Keys are db-side field names — ready to hand straight to
+	 * `transaction.set` / `transaction.update`.
+	 */
+	docData: Record<string, any>;
+	/**
+	 * Full app-visible representation of the doc including `id`. Keys are
+	 * canonical app-side field names. Used to overlay subsequent reads.
+	 */
+	appData: Record<string, any>;
+}
+
+class TxBuffer {
+	private byPath = new Map<string, TxBufferEntry>();
+
+	/** Stage a create. Returns the entry so the caller can read back `appData.id`. */
+	stageCreate(
+		model: string,
+		ref: FirebaseFirestore.DocumentReference,
+		docData: Record<string, any>,
+		appNormalized: Record<string, any>,
+	): TxBufferEntry {
+		const entry: TxBufferEntry = {
+			op: "create",
+			model,
+			ref,
+			docData: { ...docData },
+			appData: { ...appNormalized, id: ref.id },
+		};
+		this.byPath.set(ref.path, entry);
+		return entry;
+	}
+
+	/**
+	 * Stage an update on `ref`. If a prior entry exists for the same ref —
+	 * regardless of whether it was a create or update — merge in place so
+	 * the flush emits one combined write. `baseAppData` provides the
+	 * pre-update fields needed to build a full app-visible state for
+	 * subsequent read overlays.
+	 */
+	stageUpdate(
+		model: string,
+		ref: FirebaseFirestore.DocumentReference,
+		updateDocData: Record<string, any>,
+		updateAppData: Record<string, any>,
+		baseAppData: Record<string, any>,
+	): TxBufferEntry {
+		const existing = this.byPath.get(ref.path);
+		if (existing) {
+			Object.assign(existing.docData, updateDocData);
+			Object.assign(existing.appData, updateAppData);
+			return existing;
+		}
+		const entry: TxBufferEntry = {
+			op: "update",
+			model,
+			ref,
+			docData: { ...updateDocData },
+			appData: { ...baseAppData, ...updateAppData, id: ref.id },
+		};
+		this.byPath.set(ref.path, entry);
+		return entry;
+	}
+
+	/** First buffered create for `model` whose appData satisfies `where`. */
+	findCreateMatching(
+		model: string,
+		where: WhereCondition[] | undefined,
+	): TxBufferEntry | undefined {
+		for (const entry of this.byPath.values()) {
+			if (entry.op !== "create" || entry.model !== model) continue;
+			if (matchesWhere(entry.appData, where)) return entry;
+		}
+		return undefined;
+	}
+
+	/** Buffered entry (create or update) for a specific ref path, if any. */
+	getByPath(refPath: string): TxBufferEntry | undefined {
+		return this.byPath.get(refPath);
+	}
+
+	/** Replay every staged write onto the transaction in insertion order. */
+	flush(transaction: Transaction): void {
+		for (const entry of this.byPath.values()) {
+			if (entry.op === "create") transaction.set(entry.ref, entry.docData);
+			else transaction.update(entry.ref, entry.docData);
+		}
+	}
+}
+
+/**
+ * Evaluates a where clause against an in-memory app-side doc. AND-within-
+ * group, OR-between-groups (a new group starts at every `connector: "OR"`).
+ * Unknown operators fall back to equality — see TxBuffer header for the
+ * supported set.
+ */
+function matchesWhere(
+	appData: Record<string, any>,
+	where: WhereCondition[] | undefined,
+): boolean {
+	if (!where || where.length === 0) return true;
+	const groups: WhereCondition[][] = [];
+	let current: WhereCondition[] = [];
+	for (const cond of where) {
+		if (cond.connector === "OR" && current.length > 0) {
+			groups.push(current);
+			current = [cond];
+		} else {
+			current.push(cond);
+		}
+	}
+	if (current.length > 0) groups.push(current);
+	return groups.some((group) =>
+		group.every((cond) => matchesCondition(appData, cond)),
+	);
+}
+
+function matchesCondition(
+	appData: Record<string, any>,
+	cond: WhereCondition,
+): boolean {
+	const val = appData[cond.field];
+	const op = (cond.operator || "eq") as string;
+	switch (op) {
+		case "eq":
+		case "==":
+			return val === cond.value;
+		case "ne":
+		case "!=":
+			return val !== cond.value;
+		case "in":
+			return Array.isArray(cond.value)
+				? cond.value.includes(val)
+				: val === cond.value;
+		case "notIn":
+		case "not_in":
+			return Array.isArray(cond.value)
+				? !cond.value.includes(val)
+				: val !== cond.value;
+		case "gt":
+			return val > cond.value;
+		case "gte":
+			return val >= cond.value;
+		case "lt":
+			return val < cond.value;
+		case "lte":
+			return val <= cond.value;
+		case "contains":
+		case "array-contains":
+			if (Array.isArray(val)) return val.includes(cond.value);
+			if (typeof val === "string") return val.includes(String(cond.value));
+			return false;
+		case "startsWith":
+		case "starts-with":
+		case "starts_with":
+			return typeof val === "string" && val.startsWith(String(cond.value));
+		case "endsWith":
+		case "ends-with":
+		case "ends_with":
+			return typeof val === "string" && val.endsWith(String(cond.value));
+		default:
+			return val === cond.value;
+	}
+}
+
+/**
+ * Look up a single doc inside a transaction, mirroring the non-tx
+ * findOne/update path. Special-cases `id eq value` to use `col.doc(id)`
+ * because Firestore document IDs are metadata, not fields — they can't
+ * be queried with `.where("id", ...)`. Returns undefined when nothing
+ * matches.
+ */
+async function lookupTxDoc(
+	transaction: Transaction,
+	col: FirebaseFirestore.CollectionReference,
+	where: WhereCondition[] | undefined,
+	mapper: FieldMapper,
+): Promise<FirebaseFirestore.DocumentSnapshot | undefined> {
+	if (
+		where &&
+		where.length === 1 &&
+		where[0]?.field === "id" &&
+		(where[0]?.operator === "eq" || !where[0]?.operator)
+	) {
+		const docRef = col.doc(where[0].value as string);
+		const snap = await transaction.get(docRef);
+		return snap.exists ? snap : undefined;
+	}
+	for (const whereClause of getChunkedWhereClauses(where)) {
+		const q = applyWhereClause(col, whereClause, mapper);
+		const snap = await transaction.get(q.limit(1));
+		if (snap.docs[0]) return snap.docs[0];
+	}
+	return undefined;
+}
+
+/** Convert a Firestore document body (db-side keys, Timestamps) to app shape. */
+function dbDataToAppData(
+	data: Record<string, any>,
+	mapper: FieldMapper,
+): Record<string, any> {
+	const result: Record<string, any> = {};
+	for (const [k, v] of Object.entries(data)) {
+		if (k === "__name__") continue;
+		result[mapper.fromDb(k)] = convertTimestamp(v);
+	}
+	return result;
+}
+
 export interface FirestoreAdapterOptions
 	extends Omit<FirestoreAdapterConfig, "firestore"> {
 	firestore?: Firestore;
@@ -362,6 +602,8 @@ export const firestoreAdapter: (
 			debugLogs,
 			transaction: async (run) => {
 				return await db.runTransaction(async (transaction: Transaction) => {
+					const buffer = new TxBuffer();
+
 					const txAdapter = {
 						create: async ({ model, data }: any) => {
 							const col = getCollectionRef(db, model, collections);
@@ -371,54 +613,90 @@ export const firestoreAdapter: (
 								mapper,
 							);
 							const ref = idOverride ? col.doc(idOverride) : col.doc();
-							transaction.set(ref, docData);
-							return { ...normalizedData, id: ref.id };
+							const entry = buffer.stageCreate(
+								model,
+								ref,
+								docData,
+								normalizedData,
+							);
+							return { ...entry.appData };
 						},
 						update: async ({ model, where, update }: any) => {
 							const col = getCollectionRef(db, model, collections);
-							let doc: FirebaseFirestore.QueryDocumentSnapshot | undefined;
-							for (const whereClause of getChunkedWhereClauses(where)) {
-								const q = applyWhereClause(col, whereClause, mapper);
-								const snap = await transaction.get(q.limit(1));
-								doc = snap.docs[0];
-								if (doc) break;
-							}
-							if (!doc) return null;
 							const normalizedUpdate = normalizeWriteData(model, update);
 							const { docData: updateData } = buildFirestoreWriteData(
 								normalizedUpdate,
 								mapper,
 							);
-							transaction.update(doc.ref, updateData);
-							const existing = doc.data();
-							const result: any = { id: doc.id };
-							if (existing) {
-								for (const [k, v] of Object.entries(existing)) {
-									result[mapper.fromDb(k)] = v;
-								}
+
+							// 1. Overlay: target may already be staged as a create in
+							//    this same transaction. Mutate it in place so the flush
+							//    emits one combined `set`.
+							const stagedCreate = buffer.findCreateMatching(model, where);
+							if (stagedCreate) {
+								Object.assign(stagedCreate.docData, updateData);
+								Object.assign(stagedCreate.appData, normalizedUpdate);
+								return { ...stagedCreate.appData };
 							}
-							return { ...result, ...normalizedUpdate };
+
+							// 2. Otherwise read from Firestore (still safe — no writes
+							//    have been flushed yet) to locate the target doc.
+							const doc = await lookupTxDoc(
+								transaction,
+								col,
+								where,
+								mapper,
+							);
+							if (!doc) return null;
+
+							// 3. Same ref may already have an update staged; merge.
+							const existing = buffer.getByPath(doc.ref.path);
+							if (existing) {
+								Object.assign(existing.docData, updateData);
+								Object.assign(existing.appData, normalizedUpdate);
+								return { ...existing.appData };
+							}
+
+							// 4. Stage a fresh update.
+							const baseAppData = dbDataToAppData(doc.data() ?? {}, mapper);
+							const entry = buffer.stageUpdate(
+								model,
+								doc.ref,
+								updateData,
+								normalizedUpdate,
+								baseAppData,
+							);
+							return { ...entry.appData };
 						},
 						findOne: async ({ model, where }: any) => {
 							const col = getCollectionRef(db, model, collections);
-							let doc: FirebaseFirestore.QueryDocumentSnapshot | undefined;
-							for (const whereClause of getChunkedWhereClauses(where)) {
-								const q = applyWhereClause(col, whereClause, mapper);
-								const snap = await transaction.get(q.limit(1));
-								doc = snap.docs[0];
-								if (doc) break;
-							}
+
+							// 1. Overlay: return any matching staged create directly.
+							const stagedCreate = buffer.findCreateMatching(model, where);
+							if (stagedCreate) return { ...stagedCreate.appData };
+
+							// 2. Real read.
+							const doc = await lookupTxDoc(
+								transaction,
+								col,
+								where,
+								mapper,
+							);
 							if (!doc) return null;
+
+							// 3. Layer any pending update on top of the snapshot.
+							const staged = buffer.getByPath(doc.ref.path);
+							if (staged) return { ...staged.appData };
+
 							const data = doc.data();
 							if (!data) return null;
-							const result: any = { id: doc.id };
-							for (const [k, v] of Object.entries(data)) {
-								result[mapper.fromDb(k)] = convertTimestamp(v);
-							}
-							return result;
+							return { id: doc.id, ...dbDataToAppData(data, mapper) };
 						},
 					};
-					return run(txAdapter as any);
+
+					const result = await run(txAdapter as any);
+					buffer.flush(transaction);
+					return result;
 				});
 			},
 		},
