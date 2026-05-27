@@ -9,7 +9,6 @@
       {
         "preset": "angular",
         "releaseRules": [
-          { "type": "chore", "scope": "deps", "release": "patch" },
           { "type": "chore", "scope": "security", "release": "patch" }
         ]
       }
