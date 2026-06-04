@@ -73,7 +73,7 @@ Helper: `generateIndexSetupUrl(projectId, databaseId?, collectionName?)` — gen
 
 ## Important Constraints
 
-- **Edge runtime not supported** — Firebase Admin SDK requires Node.js. Vercel Edge Functions and Cloudflare Workers are not supported.
+- **Edge Runtime not supported** — Firebase Admin SDK requires Node.js. If a route sets `export const runtime = 'edge'`, the Admin SDK will not load. Standard Vercel deployments (Node.js serverless runtime) work fine.
 - **FIREBASE_PRIVATE_KEY newlines** — Environment variables often store the key with literal `\n` strings. Users must call `.replace(/\\n/g, "\n")`.
 - **Scoped package deprecated** — `@yultyyev/better-auth-firestore` → `better-auth-firestore`. The API is identical; only the import path changes.
 - **Emulator support** — Set `FIRESTORE_EMULATOR_HOST=localhost:8080`; the Admin SDK automatically routes requests there. No credentials needed.

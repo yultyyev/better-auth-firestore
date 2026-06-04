@@ -192,9 +192,12 @@ No credentials or service account needed when using the emulator.
 | Runtime | Supported |
 |---|---|
 | Node 18+ | ✅ |
-| Next.js App Router (server) | ✅ |
+| Next.js on Vercel (Node.js runtime) | ✅ Recommended |
 | Cloud Functions / Cloud Run | ✅ |
-| Vercel Edge / CF Workers | ❌ (Admin SDK not supported at edge) |
+| Vercel Edge Runtime (`runtime = 'edge'`) | ❌ Admin SDK requires Node.js |
+| Cloudflare Workers | ❌ Admin SDK requires Node.js |
+
+**Note:** Vercel deploys work fine — the restriction is only when you explicitly opt into the Edge Runtime (`export const runtime = 'edge'`). The default Node.js serverless runtime on Vercel is fully supported.
 
 ---
 

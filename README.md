@@ -236,9 +236,12 @@ firestoreAdapter({
 | Runtime | Supported | Notes |
 |---|---|---|
 | Node 18+ | ✅ | Recommended |
-| Next.js (App Router) | ✅ | Server routes only |
+| Next.js on Vercel (Node.js runtime) | ✅ | Default serverless runtime — fully supported |
 | Cloud Functions / Cloud Run | ✅ | Provide `FIREBASE_*` creds |
-| Vercel Edge / CF Workers | ❌ | Firestore Admin SDK not supported at Edge runtime |
+| Vercel Edge Runtime (`runtime = 'edge'`) | ❌ | Firebase Admin SDK requires Node.js |
+| Cloudflare Workers | ❌ | Firebase Admin SDK requires Node.js |
+
+> **Vercel works.** The ❌ above applies only if you explicitly set `export const runtime = 'edge'` on a route. The default Node.js serverless runtime on Vercel is fully supported.
 
 ## Collections & Data Shape
 
@@ -471,7 +474,7 @@ Yes. `better-auth-firestore` is designed as a drop-in replacement for the Auth.j
 
 ### Which runtimes are supported?
 
-This package supports server-side Node.js runtimes, including Next.js route handlers, Cloud Functions, and Cloud Run, anywhere the Firebase Admin SDK is supported. Edge runtimes such as Vercel Edge Functions and Cloudflare Workers are not supported because the Firestore Admin SDK does not run there. See [Runtime compatibility](#runtime-compatibility) for the current matrix.
+This package supports any server-side Node.js runtime: Next.js on Vercel (the default serverless runtime), Cloud Functions, Cloud Run, and standalone Node.js. The only restriction is the Edge Runtime — if you explicitly set `export const runtime = 'edge'` on a route, the Firebase Admin SDK will not load. Standard Vercel deployments are fully supported. See [Runtime compatibility](#runtime-compatibility) for the full matrix.
 
 ### Why is a Firestore composite index required for verification tokens?
 
