@@ -3,6 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/better-auth-firestore.svg)](https://www.npmjs.com/package/better-auth-firestore)
 [![CI](https://github.com/yultyyev/better-auth-firestore/actions/workflows/release.yml/badge.svg)](https://github.com/yultyyev/better-auth-firestore/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
+[![skills.sh](https://skills.sh/b/yultyyev/better-auth-firestore)](https://skills.sh/yultyyev/better-auth-firestore)
 
 > **Note:** If you're using `@yultyyev/better-auth-firestore`, please migrate to `better-auth-firestore`. The scoped package is deprecated. See [Migration from Scoped Package](#migration-from-scoped-package) below.
 
@@ -18,12 +19,22 @@
 
 For Firebase Authentication integration with Better Auth, see **[better-auth-firebase-auth](https://github.com/yultyyev/better-auth-firebase-auth)**. It provides:
 
-- Firebase Authentication provider support (Email/Password, Google, etc.)
-- Client-side or server-side token generation
-- Password reset functionality
-- Full TypeScript support
+- Firebase Phone Authentication (SMS OTP) — no Twilio required
+- Google Sign-In via Firebase OAuth flow
+- Email/Password sign-in and password reset via Firebase
+- Full TypeScript support with separate server/client entry points
 
-Use `better-auth-firebase-auth` for authentication and `better-auth-firestore` for data storage.
+Use `better-auth-firebase-auth` for authentication and `better-auth-firestore` for data storage. They are designed to be used together:
+
+```ts
+import { firestoreAdapter } from "better-auth-firestore";
+import { firebaseAuthPlugin } from "better-auth-firebase-auth/server";
+
+export const auth = betterAuth({
+  database: firestoreAdapter({ firestore }),
+  plugins: [firebaseAuthPlugin({ firebaseAdminAuth: getAuth() })],
+});
+```
 
 ---
 
@@ -225,9 +236,12 @@ firestoreAdapter({
 | Runtime | Supported | Notes |
 |---|---|---|
 | Node 18+ | ✅ | Recommended |
-| Next.js (App Router) | ✅ | Server routes only |
+| Next.js on Vercel (Node.js runtime) | ✅ | Default serverless runtime — fully supported |
 | Cloud Functions / Cloud Run | ✅ | Provide `FIREBASE_*` creds |
-| Vercel Edge / CF Workers | ❌ | Firestore Admin SDK not supported at Edge runtime |
+| Vercel Edge Runtime (`runtime = 'edge'`) | ❌ | Firebase Admin SDK requires Node.js |
+| Cloudflare Workers | ❌ | Firebase Admin SDK requires Node.js |
+
+> **Vercel works.** The ❌ above applies only if you explicitly set `export const runtime = 'edge'` on a route. The default Node.js serverless runtime on Vercel is fully supported.
 
 ## Collections & Data Shape
 
@@ -460,16 +474,29 @@ Yes. `better-auth-firestore` is designed as a drop-in replacement for the Auth.j
 
 ### Which runtimes are supported?
 
-This package supports server-side Node.js runtimes, including Next.js route handlers, Cloud Functions, and Cloud Run, anywhere the Firebase Admin SDK is supported. Edge runtimes such as Vercel Edge Functions and Cloudflare Workers are not supported because the Firestore Admin SDK does not run there. See [Runtime compatibility](#runtime-compatibility) for the current matrix.
+This package supports any server-side Node.js runtime: Next.js on Vercel (the default serverless runtime), Cloud Functions, Cloud Run, and standalone Node.js. The only restriction is the Edge Runtime — if you explicitly set `export const runtime = 'edge'` on a route, the Firebase Admin SDK will not load. Standard Vercel deployments are fully supported. See [Runtime compatibility](#runtime-compatibility) for the full matrix.
 
 ### Why is a Firestore composite index required for verification tokens?
 
 Better Auth verification token lookups require a Firestore query pattern that depends on a composite index. Without that index, verification-related queries can fail with a missing index error or insufficient permissions message. See [Create Required Firestore Index](#3-create-required-firestore-index) for the exact fields and setup options.
 
+## AI Assistant Skill
+
+A `SKILL.md` is included at the root of this repo. It works with Cursor, Claude Code, Codex, Copilot, Windsurf, and [70+ other agents](https://skills.sh) via the skills.sh ecosystem.
+
+The skill teaches AI assistants the correct setup, required Firestore index, environment variable handling, and common gotchas. It also triggers when you ask about using Firestore with Better Auth, migrating from Auth.js/NextAuth, or troubleshooting `FIREBASE_PRIVATE_KEY` issues.
+
+```bash
+npx skills add yultyyev/better-auth-firestore
+```
+
+---
+
 ## Related Links
 
 - [Better Auth Documentation](https://www.better-auth.com/docs)
 - [Better Auth Adapter Guide](https://www.better-auth.com/docs/guides/create-a-db-adapter)
+- [better-auth-firebase-auth](https://github.com/yultyyev/better-auth-firebase-auth) — Firebase Auth plugin (Phone OTP, Google, Email/Password)
 - [Auth.js Firebase Adapter](https://authjs.dev/getting-started/adapters/firebase) (legacy, for reference)
 - [Auth.js joins Better Auth](https://www.better-auth.com/blog/authjs-joins-better-auth) - Announcement
 
@@ -478,6 +505,10 @@ Better Auth verification token lookups require a Firestore query pattern that de
 ```bash
 pnpm build
 ```
+
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) for development setup and code style.
 
 ## License
 
