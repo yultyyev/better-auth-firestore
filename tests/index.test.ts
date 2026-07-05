@@ -413,9 +413,7 @@ describe("Transaction buffering (regression for #24)", () => {
 			});
 			return tx.findOne({
 				model: "user",
-				where: [
-					{ field: "email", operator: "eq", value: "tx3@example.com" },
-				],
+				where: [{ field: "email", operator: "eq", value: "tx3@example.com" }],
 			});
 		});
 		expect(observed).toBeTruthy();
@@ -533,5 +531,137 @@ describe("Transaction buffering (regression for #24)", () => {
 
 		const users = await db.collection(TX_COLLECTIONS.users).get();
 		expect(users.size).toBe(0);
+	});
+
+	// better-auth's magic-link plugin consumes a verification token inside
+	// adapter.transaction(), calling txAdapter.findMany (locate the latest
+	// token), txAdapter.consumeOne (read + delete atomically), and
+	// txAdapter.deleteMany (expired-token cleanup) — none of which the
+	// buffered tx adapter implemented, so every magic-link verify failed with
+	// "txAdapter.findMany is not a function". These tests exercise those
+	// three methods directly against the `user` model/collection (already
+	// covered above) to isolate the tx-adapter behavior from model-name
+	// resolution.
+	it("findMany inside a transaction returns matching Firestore-resident docs, sorted and limited", async () => {
+		const seedRef1 = db.collection(TX_COLLECTIONS.users).doc();
+		const seedRef2 = db.collection(TX_COLLECTIONS.users).doc();
+		await seedRef1.set({
+			email: "fm-shared@example.com",
+			name: "old",
+			createdAt: new Date("2030-01-01T00:00:00.000Z"),
+		});
+		await seedRef2.set({
+			email: "fm-shared@example.com",
+			name: "new",
+			createdAt: new Date("2030-01-02T00:00:00.000Z"),
+		});
+
+		const results = await adapter.transaction(async (tx: any) => {
+			return tx.findMany({
+				model: "user",
+				where: [
+					{ field: "email", operator: "eq", value: "fm-shared@example.com" },
+				],
+				sortBy: { field: "createdAt", direction: "desc" },
+				limit: 1,
+			});
+		});
+		expect(results).toHaveLength(1);
+		expect(results[0].name).toBe("new");
+	});
+
+	it("findMany inside a transaction overlays a create staged earlier in the same transaction", async () => {
+		const results = await adapter.transaction(async (tx: any) => {
+			await tx.create({
+				model: "user",
+				data: { email: "fm-buffered@example.com", name: "Buffered" },
+			});
+			return tx.findMany({
+				model: "user",
+				where: [
+					{ field: "email", operator: "eq", value: "fm-buffered@example.com" },
+				],
+			});
+		});
+		expect(results).toHaveLength(1);
+		expect(results[0].name).toBe("Buffered");
+	});
+
+	it("consumeOne inside a transaction returns the doc and deletes it on flush", async () => {
+		const seedRef = db.collection(TX_COLLECTIONS.users).doc();
+		await seedRef.set({ email: "consume@example.com", name: "ToConsume" });
+
+		const consumed = await adapter.transaction(async (tx: any) => {
+			return tx.consumeOne({
+				model: "user",
+				where: [
+					{ field: "email", operator: "eq", value: "consume@example.com" },
+				],
+			});
+		});
+		expect(consumed?.name).toBe("ToConsume");
+
+		const persisted = await seedRef.get();
+		expect(persisted.exists).toBe(false);
+	});
+
+	it("consumeOne inside a transaction is invisible to a subsequent findOne in the same transaction", async () => {
+		const seedRef = db.collection(TX_COLLECTIONS.users).doc();
+		await seedRef.set({ email: "gone@example.com", name: "Gone" });
+
+		const observedAfterConsume = await adapter.transaction(async (tx: any) => {
+			await tx.consumeOne({
+				model: "user",
+				where: [{ field: "email", operator: "eq", value: "gone@example.com" }],
+			});
+			return tx.findOne({
+				model: "user",
+				where: [{ field: "email", operator: "eq", value: "gone@example.com" }],
+			});
+		});
+		expect(observedAfterConsume).toBeNull();
+	});
+
+	it("deleteMany inside a transaction removes all matching docs on flush", async () => {
+		const seedRef1 = db.collection(TX_COLLECTIONS.users).doc();
+		const seedRef2 = db.collection(TX_COLLECTIONS.users).doc();
+		await seedRef1.set({ email: "expire@example.com", name: "a" });
+		await seedRef2.set({ email: "expire@example.com", name: "b" });
+
+		const count = await adapter.transaction(async (tx: any) => {
+			return tx.deleteMany({
+				model: "user",
+				where: [
+					{ field: "email", operator: "eq", value: "expire@example.com" },
+				],
+			});
+		});
+		expect(count).toBe(2);
+
+		const remaining = await db
+			.collection(TX_COLLECTIONS.users)
+			.where("email", "==", "expire@example.com")
+			.get();
+		expect(remaining.size).toBe(0);
+	});
+
+	it("throwing after consumeOne inside the callback aborts the transaction (doc survives)", async () => {
+		const seedRef = db.collection(TX_COLLECTIONS.users).doc();
+		await seedRef.set({ email: "abort@example.com", name: "Abort" });
+
+		await expect(
+			adapter.transaction(async (tx: any) => {
+				await tx.consumeOne({
+					model: "user",
+					where: [
+						{ field: "email", operator: "eq", value: "abort@example.com" },
+					],
+				});
+				throw new Error("intentional");
+			}),
+		).rejects.toThrow("intentional");
+
+		const persisted = await seedRef.get();
+		expect(persisted.exists).toBe(true);
 	});
 });
