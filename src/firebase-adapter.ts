@@ -1110,7 +1110,13 @@ export const firestoreAdapter: (
 					}
 					return count;
 				},
-				consumeOne: async ({ model, where }) => {
+				consumeOne: async <T>({
+					model,
+					where,
+				}: {
+					model: string;
+					where: WhereCondition[];
+				}) => {
 					const col = getCollectionRef(db, model, collections);
 					return await db.runTransaction(async (transaction) => {
 						const doc = await lookupTxDoc(transaction, col, where, mapper);
@@ -1122,7 +1128,7 @@ export const firestoreAdapter: (
 							...dbDataToAppData(data, mapper),
 						};
 						transaction.delete(doc.ref);
-						return appData as any;
+						return appData as T;
 					});
 				},
 				findOne: async ({ model, where, select }) => {
