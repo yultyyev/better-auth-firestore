@@ -1,0 +1,39 @@
+# better-auth-firestore
+
+> Firestore database adapter for Better Auth using the Firebase Admin SDK — a drop-in replacement for the Auth.js Firebase adapter.
+
+Install: `pnpm add better-auth-firestore firebase-admin better-auth`
+
+Agent skill: `npx skills add yultyyev/better-auth-firestore`
+
+This package stores Better Auth users, sessions, accounts, and verification tokens in Firestore. Pair with [better-auth-firebase-auth](https://github.com/yultyyev/better-auth-firebase-auth) when you also need Firebase Authentication (Phone OTP, Google, Email/Password).
+
+## Documentation
+
+- [README](https://github.com/yultyyev/better-auth-firestore/blob/main/README.md): Full setup guide, options, migration, emulator, troubleshooting, and FAQ
+- [AI Assistant Skill (SKILL.md)](https://github.com/yultyyev/better-auth-firestore/blob/main/skills/firestore-better-auth/SKILL.md): Agent instructions for setup, index creation, env vars, and common mistakes
+- [AGENTS.md](https://github.com/yultyyev/better-auth-firestore/blob/main/AGENTS.md): Project context for AI assistants working on this codebase
+- [CONTRIBUTING.md](https://github.com/yultyyev/better-auth-firestore/blob/main/CONTRIBUTING.md): Development and contribution guidelines
+- [Minimal Next.js example](https://github.com/yultyyev/better-auth-firestore/tree/main/examples/minimal): Working App Router integration
+
+## Package & ecosystem
+
+- [npm: better-auth-firestore](https://www.npmjs.com/package/better-auth-firestore): Published package
+- [skills.sh listing](https://skills.sh/yultyyev/better-auth-firestore): Agent skill directory (indexed after install telemetry)
+- [better-auth-firebase-auth](https://github.com/yultyyev/better-auth-firebase-auth): Sister plugin for Firebase Auth identity providers
+- [Better Auth docs](https://www.better-auth.com/docs): Framework documentation
+- [Better Auth adapter guide](https://www.better-auth.com/docs/guides/create-a-db-adapter): How database adapters work
+
+## Key topics for AI assistants
+
+- Required Firestore composite index on `verification`: `identifier` ASC, `createdAt` DESC, `__name__` DESC — use `generateIndexSetupUrl(projectId)` from this package
+- `FIREBASE_PRIVATE_KEY` env vars often contain literal `\n` — call `.replace(/\\n/g, "\n")` before passing to `cert()`
+- Node.js runtimes only — Firebase Admin SDK does not run on Vercel Edge or Cloudflare Workers (default Vercel serverless Node.js is supported)
+- Migration from Auth.js/NextAuth: same default collection names and field shapes, no Firestore data migration needed
+- Local dev and tests: set `FIRESTORE_EMULATOR_HOST=localhost:8080` — no credentials required with the emulator
+
+## Optional
+
+- [Auth.js Firebase adapter (legacy)](https://authjs.dev/getting-started/adapters/firebase): Original adapter this package replaces
+- [Auth.js joins Better Auth](https://www.better-auth.com/blog/authjs-joins-better-auth): Migration context
+- [Firestore emulator docs](https://firebase.google.com/docs/emulator-suite/connect_firestore): Official Firebase emulator setup

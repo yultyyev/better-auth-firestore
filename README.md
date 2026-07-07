@@ -12,6 +12,7 @@
 - **Install:** `pnpm add better-auth-firestore firebase-admin better-auth`
 - **Docs:** [Quickstart](#quick-start) • [Options](#options) • [Migration](#migration-from-authjsnextauth) • [Emulator](#using-the-firestore-emulator)
 - **Example:** See [`/examples/minimal`](./examples/minimal) for a complete Next.js App Router example
+- **AI skill:** [Cursor, Claude Code, Codex & 70+ agents](#ai-assistant-skill) — `npx skills add yultyyev/better-auth-firestore` • [llms.txt](./llms.txt)
 
 ---
 
@@ -443,11 +444,13 @@ pnpm vitest run
 privateKey: process.env.FIREBASE_PRIVATE_KEY!.replace(/\\n/g, "\n")
 ```
 
+See also the [AI Assistant Skill](#ai-assistant-skill) — agents use it to avoid this mistake during setup.
+
 ### Error: Requests hang on local dev
 
 **Symptom:** Firebase Admin SDK requests hang or time out during local development.
 
-**Fix:** Use the Firestore Emulator and set `FIRESTORE_EMULATOR_HOST=localhost:8080` before running your app. See [Using the Firestore Emulator](#using-the-firestore-emulator) for setup instructions.
+**Fix:** Use the Firestore Emulator and set `FIRESTORE_EMULATOR_HOST=localhost:8080` before running your app. See [Using the Firestore Emulator](#using-the-firestore-emulator) for setup instructions. The [AI Assistant Skill](#ai-assistant-skill) includes emulator commands for agents.
 
 ### Error: Missing or insufficient permissions / Index required
 
@@ -462,23 +465,25 @@ const url = generateIndexSetupUrl(process.env.FIREBASE_PROJECT_ID!);
 console.log(url); // Open this URL to create the index
 ```
 
+The [AI Assistant Skill](#ai-assistant-skill) documents index fields and `generateIndexSetupUrl` for agent-driven setup.
+
 ## FAQ
 
 ### Can I migrate from Auth.js / NextAuth without changing existing Firestore data?
 
-Yes. `better-auth-firestore` is designed as a drop-in replacement for the Auth.js Firebase adapter with matching collection names and field shapes by default, so most projects do not need a Firestore data migration. See [Migration from Auth.js/NextAuth](#migration-from-authjsnextauth) for the adapter-specific details.
+Yes. `better-auth-firestore` is designed as a drop-in replacement for the Auth.js Firebase adapter with matching collection names and field shapes by default, so most projects do not need a Firestore data migration. See [Migration from Auth.js/NextAuth](#migration-from-authjsnextauth) for the adapter-specific details. The [AI Assistant Skill](#ai-assistant-skill) includes a migration guide for Cursor, Claude Code, and other agents.
 
 ### What's the difference between `better-auth-firestore` and `better-auth-firebase-auth`?
 
-`better-auth-firestore` is a database adapter for storing Better Auth users, sessions, accounts, and verification tokens in Firestore through the Firebase Admin SDK. `better-auth-firebase-auth` is for Firebase Authentication provider integration such as Email/Password, Google sign-in, client/server token generation, and password reset flows. Use the Firestore adapter for data storage and the Firebase Auth plugin when you need Firebase Authentication features.
+`better-auth-firestore` is a database adapter for storing Better Auth users, sessions, accounts, and verification tokens in Firestore through the Firebase Admin SDK. `better-auth-firebase-auth` is for Firebase Authentication provider integration such as Email/Password, Google sign-in, client/server token generation, and password reset flows. Use the Firestore adapter for data storage and the Firebase Auth plugin when you need Firebase Authentication features. Both packages have [AI Assistant Skills](#ai-assistant-skill) on [skills.sh](https://skills.sh).
 
 ### Which runtimes are supported?
 
-This package supports any server-side Node.js runtime: Next.js on Vercel (the default serverless runtime), Cloud Functions, Cloud Run, and standalone Node.js. The only restriction is the Edge Runtime — if you explicitly set `export const runtime = 'edge'` on a route, the Firebase Admin SDK will not load. Standard Vercel deployments are fully supported. See [Runtime compatibility](#runtime-compatibility) for the full matrix.
+This package supports any server-side Node.js runtime: Next.js on Vercel (the default serverless runtime), Cloud Functions, Cloud Run, and standalone Node.js. The only restriction is the Edge Runtime — if you explicitly set `export const runtime = 'edge'` on a route, the Firebase Admin SDK will not load. Standard Vercel deployments are fully supported. See [Runtime compatibility](#runtime-compatibility) for the full matrix. Agents should follow the runtime table in the [AI Assistant Skill](#ai-assistant-skill).
 
 ### Why is a Firestore composite index required for verification tokens?
 
-Better Auth verification token lookups require a Firestore query pattern that depends on a composite index. Without that index, verification-related queries can fail with a missing index error or insufficient permissions message. See [Create Required Firestore Index](#3-create-required-firestore-index) for the exact fields and setup options.
+Better Auth verification token lookups require a Firestore query pattern that depends on a composite index. Without that index, verification-related queries can fail with a missing index error or insufficient permissions message. See [Create Required Firestore Index](#3-create-required-firestore-index) for the exact fields and setup options. The [AI Assistant Skill](#ai-assistant-skill) documents index creation and `generateIndexSetupUrl`.
 
 ## AI Assistant Skill
 
@@ -490,6 +495,8 @@ The skill teaches AI assistants the correct setup, required Firestore index, env
 npx skills add yultyyev/better-auth-firestore
 ```
 
+For LLM crawlers and AI search, see also [`llms.txt`](./llms.txt) at the repo root — a curated index of documentation, the skill file, and key setup facts.
+
 Install works today from GitHub. The [skills.sh listing page](https://skills.sh/yultyyev/better-auth-firestore) and README badge appear once indexed — tracking [vercel-labs/skills#1601](https://github.com/vercel-labs/skills/issues/1601).
 
 ---
@@ -498,6 +505,7 @@ Install works today from GitHub. The [skills.sh listing page](https://skills.sh/
 
 - [Better Auth Documentation](https://www.better-auth.com/docs)
 - [Better Auth Adapter Guide](https://www.better-auth.com/docs/guides/create-a-db-adapter)
+- [llms.txt](./llms.txt) — Curated index for AI assistants and LLM crawlers
 - [better-auth-firebase-auth](https://github.com/yultyyev/better-auth-firebase-auth) — Firebase Auth plugin (Phone OTP, Google, Email/Password)
 - [Auth.js Firebase Adapter](https://authjs.dev/getting-started/adapters/firebase) (legacy, for reference)
 - [Auth.js joins Better Auth](https://www.better-auth.com/blog/authjs-joins-better-auth) - Announcement
