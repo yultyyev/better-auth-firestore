@@ -1,5 +1,6 @@
 ---
 name: firestore-better-auth
+version: 1.0.0
 description: >-
   Use Firestore as the database adapter for Better Auth (Firebase Admin SDK).
   Use when storing Better Auth users, sessions, accounts, and verification

@@ -482,13 +482,15 @@ Better Auth verification token lookups require a Firestore query pattern that de
 
 ## AI Assistant Skill
 
-A `SKILL.md` is included at the root of this repo. It works with Cursor, Claude Code, Codex, Copilot, Windsurf, and [70+ other agents](https://skills.sh) via the skills.sh ecosystem.
+The agent skill lives at [`skills/firestore-better-auth/SKILL.md`](./skills/firestore-better-auth/SKILL.md). It works with Cursor, Claude Code, Codex, Copilot, Windsurf, and [70+ other agents](https://skills.sh) via the [skills.sh](https://skills.sh) ecosystem.
 
 The skill teaches AI assistants the correct setup, required Firestore index, environment variable handling, and common gotchas. It also triggers when you ask about using Firestore with Better Auth, migrating from Auth.js/NextAuth, or troubleshooting `FIREBASE_PRIVATE_KEY` issues.
 
 ```bash
 npx skills add yultyyev/better-auth-firestore
 ```
+
+Install works today from GitHub. The [skills.sh listing page](https://skills.sh/yultyyev/better-auth-firestore) and README badge appear once indexed — tracking [vercel-labs/skills#1601](https://github.com/vercel-labs/skills/issues/1601).
 
 ---
 
