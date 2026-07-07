@@ -160,7 +160,7 @@ function getCollectionRef(
 	if (normalized === "user") return db.collection(collections.users);
 	if (normalized === "session") return db.collection(collections.sessions);
 	if (normalized === "account") return db.collection(collections.accounts);
-	if (normalized === "verificationtoken")
+	if (normalized === "verification" || normalized === "verificationtoken")
 		return db.collection(collections.verificationTokens);
 	return db.collection(model);
 }
@@ -717,6 +717,9 @@ export const firestoreAdapter: (
 							if (!data) return null;
 							return { id: doc.id, ...dbDataToAppData(data, mapper) };
 						},
+						// Subset of the non-tx `findMany` path: no OR-split queries or
+						// direct `id` lookups. better-auth's tx callbacks (e.g.
+						// consumeVerificationValue) only issue simple equality filters.
 						findMany: async ({ model, where, limit, offset, sortBy }: any) => {
 							const col = getCollectionRef(db, model, collections);
 							const byPath = new Map<string, Record<string, any>>();
@@ -785,6 +788,19 @@ export const firestoreAdapter: (
 									buffer.stageDelete(model, doc.ref);
 									count++;
 								}
+							}
+							// Staged creates are invisible to Firestore queries until flush.
+							for (const entry of buffer.values()) {
+								if (entry.op !== "create" || entry.model !== model) continue;
+								if (
+									seenPaths.has(entry.ref.path) ||
+									buffer.isDeleted(entry.ref.path)
+								)
+									continue;
+								if (!matchesWhere(entry.appData, where)) continue;
+								seenPaths.add(entry.ref.path);
+								buffer.stageDelete(model, entry.ref);
+								count++;
 							}
 							return count;
 						},
@@ -1093,6 +1109,21 @@ export const firestoreAdapter: (
 						count++;
 					}
 					return count;
+				},
+				consumeOne: async ({ model, where }) => {
+					const col = getCollectionRef(db, model, collections);
+					return await db.runTransaction(async (transaction) => {
+						const doc = await lookupTxDoc(transaction, col, where, mapper);
+						if (!doc) return null;
+						const data = doc.data();
+						if (!data) return null;
+						const appData = {
+							id: doc.id,
+							...dbDataToAppData(data, mapper),
+						};
+						transaction.delete(doc.ref);
+						return appData as any;
+					});
 				},
 				findOne: async ({ model, where, select }) => {
 					const col = getCollectionRef(db, model, collections);
