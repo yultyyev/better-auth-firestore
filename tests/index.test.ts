@@ -645,6 +645,93 @@ describe("Transaction buffering (regression for #24)", () => {
 		expect(remaining.size).toBe(0);
 	});
 
+	it("deleteMany inside a transaction removes buffered creates matching where", async () => {
+		const count = await adapter.transaction(async (tx: any) => {
+			await tx.create({
+				model: "user",
+				data: { email: "buffered-delete@example.com", name: "Buffered" },
+			});
+			return tx.deleteMany({
+				model: "user",
+				where: [
+					{
+						field: "email",
+						operator: "eq",
+						value: "buffered-delete@example.com",
+					},
+				],
+			});
+		});
+		expect(count).toBe(1);
+
+		const users = await db
+			.collection(TX_COLLECTIONS.users)
+			.where("email", "==", "buffered-delete@example.com")
+			.get();
+		expect(users.size).toBe(0);
+	});
+
+	it("consumeVerificationValue-style flow works on the verification model inside a transaction", async () => {
+		const identifier = "magic-link:test@example.com";
+		const oldRef = db.collection(TX_COLLECTIONS.verificationTokens).doc();
+		const newRef = db.collection(TX_COLLECTIONS.verificationTokens).doc();
+		await oldRef.set({
+			identifier,
+			token: "old-token",
+			expiresAt: new Date("2030-01-01T00:00:00.000Z"),
+			createdAt: new Date("2030-01-01T00:00:00.000Z"),
+		});
+		await newRef.set({
+			identifier,
+			token: "new-token",
+			expiresAt: new Date("2030-01-02T00:00:00.000Z"),
+			createdAt: new Date("2030-01-02T00:00:00.000Z"),
+		});
+
+		const consumed = await adapter.transaction(async (tx: any) => {
+			const where = [
+				{ field: "identifier", operator: "eq", value: identifier },
+			];
+			const latest = (
+				await tx.findMany({
+					model: "verification",
+					where,
+					sortBy: { field: "createdAt", direction: "desc" },
+					limit: 1,
+				})
+			)[0];
+			expect(latest?.token).toBe("new-token");
+			const row = await tx.consumeOne({
+				model: "verification",
+				where: [{ field: "id", operator: "eq", value: latest.id }],
+			});
+			await tx.deleteMany({ model: "verification", where });
+			return row;
+		});
+
+		expect(consumed?.token).toBe("new-token");
+
+		const remaining = await db
+			.collection(TX_COLLECTIONS.verificationTokens)
+			.where("identifier", "==", identifier)
+			.get();
+		expect(remaining.size).toBe(0);
+	});
+
+	it("native consumeOne deletes a matching Firestore doc", async () => {
+		const seedRef = db.collection(TX_COLLECTIONS.users).doc();
+		await seedRef.set({ email: "native-consume@example.com", name: "Native" });
+
+		const consumed = await adapter.consumeOne({
+			model: "user",
+			where: [
+				{ field: "email", operator: "eq", value: "native-consume@example.com" },
+			],
+		});
+		expect(consumed?.name).toBe("Native");
+		expect((await seedRef.get()).exists).toBe(false);
+	});
+
 	it("throwing after consumeOne inside the callback aborts the transaction (doc survives)", async () => {
 		const seedRef = db.collection(TX_COLLECTIONS.users).doc();
 		await seedRef.set({ email: "abort@example.com", name: "Abort" });
