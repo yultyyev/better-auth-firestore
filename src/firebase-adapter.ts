@@ -264,7 +264,9 @@ function isDocumentReferenceLike(value: unknown): value is { id: string } {
 	);
 }
 
-function normalizeSessionWriteData(data: Record<string, any>): Record<string, any> {
+function normalizeSessionWriteData(
+	data: Record<string, any>,
+): Record<string, any> {
 	const { user_id, session_token, ...rest } = data;
 	const normalized: Record<string, any> = { ...rest };
 
@@ -283,7 +285,10 @@ function normalizeSessionWriteData(data: Record<string, any>): Record<string, an
 	return normalized;
 }
 
-function normalizeWriteData(model: string, data: Record<string, any>): Record<string, any> {
+function normalizeWriteData(
+	model: string,
+	data: Record<string, any>,
+): Record<string, any> {
 	const normalizedModel = model.toLowerCase().replace(/s$/, "");
 	if (normalizedModel !== "session") return data;
 	return normalizeSessionWriteData(data);
@@ -348,10 +353,8 @@ function buildFirestoreWriteData(
 // buffered docs of the same model — in practice better-auth never
 // generates such clauses inside its tx callbacks.
 
-type TxBufferOp = "create" | "update";
-
-interface TxBufferEntry {
-	op: TxBufferOp;
+interface TxBufferWriteEntry {
+	op: "create" | "update";
 	model: string;
 	ref: FirebaseFirestore.DocumentReference;
 	/**
@@ -367,6 +370,14 @@ interface TxBufferEntry {
 	appData: Record<string, any>;
 }
 
+interface TxBufferDeleteEntry {
+	op: "delete";
+	model: string;
+	ref: FirebaseFirestore.DocumentReference;
+}
+
+type TxBufferEntry = TxBufferWriteEntry | TxBufferDeleteEntry;
+
 class TxBuffer {
 	private byPath = new Map<string, TxBufferEntry>();
 
@@ -376,8 +387,8 @@ class TxBuffer {
 		ref: FirebaseFirestore.DocumentReference,
 		docData: Record<string, any>,
 		appNormalized: Record<string, any>,
-	): TxBufferEntry {
-		const entry: TxBufferEntry = {
+	): TxBufferWriteEntry {
+		const entry: TxBufferWriteEntry = {
 			op: "create",
 			model,
 			ref,
@@ -401,14 +412,14 @@ class TxBuffer {
 		updateDocData: Record<string, any>,
 		updateAppData: Record<string, any>,
 		baseAppData: Record<string, any>,
-	): TxBufferEntry {
+	): TxBufferWriteEntry {
 		const existing = this.byPath.get(ref.path);
-		if (existing) {
+		if (existing && existing.op !== "delete") {
 			Object.assign(existing.docData, updateDocData);
 			Object.assign(existing.appData, updateAppData);
 			return existing;
 		}
-		const entry: TxBufferEntry = {
+		const entry: TxBufferWriteEntry = {
 			op: "update",
 			model,
 			ref,
@@ -423,7 +434,7 @@ class TxBuffer {
 	findCreateMatching(
 		model: string,
 		where: WhereCondition[] | undefined,
-	): TxBufferEntry | undefined {
+	): TxBufferWriteEntry | undefined {
 		for (const entry of this.byPath.values()) {
 			if (entry.op !== "create" || entry.model !== model) continue;
 			if (matchesWhere(entry.appData, where)) return entry;
@@ -431,16 +442,34 @@ class TxBuffer {
 		return undefined;
 	}
 
-	/** Buffered entry (create or update) for a specific ref path, if any. */
+	/** Stage a delete on `ref`, discarding any prior create/update for the same path. */
+	stageDelete(model: string, ref: FirebaseFirestore.DocumentReference): void {
+		this.byPath.set(ref.path, { op: "delete", model, ref });
+	}
+
+	/** True if `ref` has a delete staged. */
+	isDeleted(refPath: string): boolean {
+		const entry = this.byPath.get(refPath);
+		return !!entry && entry.op === "delete";
+	}
+
+	/** Buffered entry (create, update, or delete) for a specific ref path, if any. */
 	getByPath(refPath: string): TxBufferEntry | undefined {
 		return this.byPath.get(refPath);
+	}
+
+	/** All buffered entries, for scanning staged creates by model. */
+	values(): IterableIterator<TxBufferEntry> {
+		return this.byPath.values();
 	}
 
 	/** Replay every staged write onto the transaction in insertion order. */
 	flush(transaction: Transaction): void {
 		for (const entry of this.byPath.values()) {
 			if (entry.op === "create") transaction.set(entry.ref, entry.docData);
-			else transaction.update(entry.ref, entry.docData);
+			else if (entry.op === "update")
+				transaction.update(entry.ref, entry.docData);
+			else transaction.delete(entry.ref);
 		}
 	}
 }
@@ -641,17 +670,14 @@ export const firestoreAdapter: (
 
 							// 2. Otherwise read from Firestore (still safe — no writes
 							//    have been flushed yet) to locate the target doc.
-							const doc = await lookupTxDoc(
-								transaction,
-								col,
-								where,
-								mapper,
-							);
+							const doc = await lookupTxDoc(transaction, col, where, mapper);
 							if (!doc) return null;
 
 							// 3. Same ref may already have an update staged; merge.
+							//    (A staged delete is skipped — falls through to stage a
+							//    fresh update below, mirroring "not currently buffered".)
 							const existing = buffer.getByPath(doc.ref.path);
-							if (existing) {
+							if (existing && existing.op !== "delete") {
 								Object.assign(existing.docData, updateData);
 								Object.assign(existing.appData, normalizedUpdate);
 								return { ...existing.appData };
@@ -676,21 +702,114 @@ export const firestoreAdapter: (
 							if (stagedCreate) return { ...stagedCreate.appData };
 
 							// 2. Real read.
-							const doc = await lookupTxDoc(
-								transaction,
-								col,
-								where,
-								mapper,
-							);
+							const doc = await lookupTxDoc(transaction, col, where, mapper);
 							if (!doc) return null;
 
-							// 3. Layer any pending update on top of the snapshot.
+							// 3. A pending delete makes this doc invisible.
+							if (buffer.isDeleted(doc.ref.path)) return null;
+
+							// 4. Layer any pending update on top of the snapshot.
 							const staged = buffer.getByPath(doc.ref.path);
-							if (staged) return { ...staged.appData };
+							if (staged && staged.op !== "delete")
+								return { ...staged.appData };
 
 							const data = doc.data();
 							if (!data) return null;
 							return { id: doc.id, ...dbDataToAppData(data, mapper) };
+						},
+						findMany: async ({ model, where, limit, offset, sortBy }: any) => {
+							const col = getCollectionRef(db, model, collections);
+							const byPath = new Map<string, Record<string, any>>();
+
+							// 1. Real reads (chunked for oversized `in` clauses), overlaying
+							//    any staged update and dropping any staged delete.
+							for (const whereClause of getChunkedWhereClauses(where)) {
+								const q = applyWhereClause(col, whereClause, mapper);
+								const snap = await transaction.get(q);
+								for (const doc of snap.docs) {
+									if (buffer.isDeleted(doc.ref.path)) continue;
+									const staged = buffer.getByPath(doc.ref.path);
+									if (staged && staged.op !== "delete") {
+										byPath.set(doc.ref.path, { ...staged.appData });
+										continue;
+									}
+									const data = doc.data();
+									if (!data) continue;
+									byPath.set(doc.ref.path, {
+										id: doc.id,
+										...dbDataToAppData(data, mapper),
+									});
+								}
+							}
+
+							// 2. Overlay: staged creates in this transaction that match `where`.
+							for (const entry of buffer.values()) {
+								if (entry.op !== "create" || entry.model !== model) continue;
+								if (
+									!byPath.has(entry.ref.path) &&
+									matchesWhere(entry.appData, where)
+								) {
+									byPath.set(entry.ref.path, { ...entry.appData });
+								}
+							}
+
+							let results = Array.from(byPath.values());
+							if (sortBy?.field) {
+								results.sort((a, b) => {
+									const aVal = a[sortBy.field];
+									const bVal = b[sortBy.field];
+									const dir = sortBy.direction === "desc" ? -1 : 1;
+									if (aVal < bVal) return -1 * dir;
+									if (aVal > bVal) return 1 * dir;
+									return 0;
+								});
+							}
+							if (offset) results = results.slice(offset);
+							if (limit !== undefined) results = results.slice(0, limit);
+							return results;
+						},
+						deleteMany: async ({ model, where }: any) => {
+							const col = getCollectionRef(db, model, collections);
+							let count = 0;
+							const seenPaths = new Set<string>();
+							for (const whereClause of getChunkedWhereClauses(where)) {
+								const q = applyWhereClause(col, whereClause, mapper);
+								const snap = await transaction.get(q);
+								for (const doc of snap.docs) {
+									if (
+										seenPaths.has(doc.ref.path) ||
+										buffer.isDeleted(doc.ref.path)
+									)
+										continue;
+									seenPaths.add(doc.ref.path);
+									buffer.stageDelete(model, doc.ref);
+									count++;
+								}
+							}
+							return count;
+						},
+						consumeOne: async ({ model, where }: any) => {
+							const col = getCollectionRef(db, model, collections);
+							const stagedCreate = buffer.findCreateMatching(model, where);
+							if (stagedCreate) {
+								buffer.stageDelete(model, stagedCreate.ref);
+								return { ...stagedCreate.appData };
+							}
+							const doc = await lookupTxDoc(transaction, col, where, mapper);
+							if (!doc || buffer.isDeleted(doc.ref.path)) return null;
+							const staged = buffer.getByPath(doc.ref.path);
+							const appData =
+								staged && staged.op !== "delete"
+									? { ...staged.appData }
+									: (() => {
+											const data = doc.data();
+											return data
+												? { id: doc.id, ...dbDataToAppData(data, mapper) }
+												: null;
+										})();
+							if (!appData) return null;
+							buffer.stageDelete(model, doc.ref);
+							return appData;
 						},
 					};
 
@@ -1706,7 +1825,11 @@ export const firestoreAdapter: (
 						return matchingIds.size;
 					}
 
-					const q: FirebaseFirestore.Query = applyWhereClause(col, where, mapper);
+					const q: FirebaseFirestore.Query = applyWhereClause(
+						col,
+						where,
+						mapper,
+					);
 					const snap = await q.count().get();
 					return snap.data().count ?? 0;
 				},
