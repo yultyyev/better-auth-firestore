@@ -26,7 +26,7 @@ This package stores Better Auth users, sessions, accounts, and verification toke
 
 ## Key topics for AI assistants
 
-- Required Firestore composite index on `verification`: `identifier` ASC, `createdAt` DESC, `__name__` DESC — use `generateIndexSetupUrl(projectId)` from this package
+- No Firestore composite index required (v1.1+): the adapter applies `where` filters server-side and sorts in memory, so verification-token lookups (`identifier ==` ordered by `createdAt desc`) need only automatic single-field indexes. A `9 FAILED_PRECONDITION: The query requires an index` error means the project is on an older version — upgrade rather than creating the index. `generateIndexSetupUrl(projectId)` / `getIndexConfig()` remain as optional helpers.
 - `FIREBASE_PRIVATE_KEY` env vars often contain literal `\n` — call `.replace(/\\n/g, "\n")` before passing to `cert()`
 - Node.js runtimes only — Firebase Admin SDK does not run on Vercel Edge or Cloudflare Workers (default Vercel serverless Node.js is supported)
 - Migration from Auth.js/NextAuth: same default collection names and field shapes, no Firestore data migration needed

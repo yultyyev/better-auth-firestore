@@ -63,13 +63,13 @@ firestoreAdapter({
 });
 ```
 
-## Required Firestore Index
+## Firestore Index (Optional)
 
-The adapter requires a composite index on the verification collection. Without it, `verificationToken` queries fail. Always remind users to create it when setting up a new project.
+No composite index is required. The adapter never issues a filter + `orderBy` query: `findMany` calls that combine a `where` filter with a `sortBy` apply the filter server-side and sort the results in memory. Verification-token lookups (`identifier ==` ordered by `createdAt desc`) therefore work with only Firestore's automatic single-field indexes.
 
-Fields: `identifier` (ASC), `createdAt` (DESC), `__name__` (DESC), scope: Collection.
+Older versions (< v1.1) required a composite index on the verification collection (`identifier` ASC, `createdAt` DESC, `__name__` DESC). If a user reports `9 FAILED_PRECONDITION: The query requires an index` (often surfaced by Better Auth as `Failed to parse state`), the fix is to upgrade — not to create the index.
 
-Helper: `generateIndexSetupUrl(projectId, databaseId?, collectionName?)` — generates the Firebase Console URL that pre-fills the index creation form.
+Helper (optional, for advanced/direct-query setups only): `generateIndexSetupUrl(projectId, databaseId?, collectionName?)` and `getIndexConfig(collectionName?)`. Both default `collectionName` to `verificationTokens` (use `verification_tokens` for snake_case).
 
 ## Important Constraints
 

@@ -142,6 +142,63 @@ describe.each<TestConfig>(
 		expect(remaining[0]?.id).toBe(createdB.id);
 	});
 
+	// Regression: verification-token lookups issue `where identifier ==` +
+	// `sortBy createdAt desc`. That combination used to call Firestore's
+	// `orderBy` on a filtered query, which requires a composite index and fails
+	// in production with `9 FAILED_PRECONDITION: The query requires an index`.
+	// The adapter now sorts filtered queries in memory, so no index is needed.
+	it("findMany sorts a where-filtered query in memory (verification-token shape)", async () => {
+		const adapter = getAdapter() as any;
+		const col = cfg.collections.verificationTokens;
+		await clearCollection(db, col);
+		const identifier = "magic-link:index-regression@example.com";
+
+		// Seed directly with fixed ids so we can assert ordering by id.
+		// (adapter.create would route through Better Auth's schema, generate its
+		// own ids, and drop non-schema fields — this test targets the adapter's
+		// findMany query/sort path, not create transformation.)
+		await db.collection(col).doc("vt_old").set({
+			identifier,
+			value: "old-token",
+			createdAt: new Date("2030-01-01T00:00:00.000Z"),
+			expiresAt: new Date("2030-01-01T01:00:00.000Z"),
+		});
+		await db.collection(col).doc("vt_new").set({
+			identifier,
+			value: "new-token",
+			createdAt: new Date("2030-01-02T00:00:00.000Z"),
+			expiresAt: new Date("2030-01-02T01:00:00.000Z"),
+		});
+
+		const latest = await adapter.findMany({
+			model: "verification",
+			where: [{ field: "identifier", operator: "eq", value: identifier }],
+			sortBy: { field: "createdAt", direction: "desc" },
+			limit: 1,
+		});
+		expect(latest).toHaveLength(1);
+		expect(latest[0]?.id).toBe("vt_new");
+		expect(latest[0]?.value).toBe("new-token");
+
+		const ascending = await adapter.findMany({
+			model: "verification",
+			where: [{ field: "identifier", operator: "eq", value: identifier }],
+			sortBy: { field: "createdAt", direction: "asc" },
+		});
+		expect(ascending.map((r: any) => r.id)).toEqual(["vt_old", "vt_new"]);
+
+		const offsetResult = await adapter.findMany({
+			model: "verification",
+			where: [{ field: "identifier", operator: "eq", value: identifier }],
+			sortBy: { field: "createdAt", direction: "desc" },
+			offset: 1,
+		});
+		expect(offsetResult).toHaveLength(1);
+		expect(offsetResult[0]?.id).toBe("vt_old");
+
+		await clearCollection(db, col);
+	});
+
 	it("handles oversized non-ID in clauses across CRUD methods", async () => {
 		const adapter = getAdapter() as any;
 		const oversizedEmails = Array.from(

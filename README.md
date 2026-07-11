@@ -124,46 +124,13 @@ export const auth = betterAuth({
 3. Choose your preferred security rules mode (you can update rules later)
 4. Select a location for your database
 
-### 3. Create Required Firestore Index
+### 3. Firestore Index (Optional)
 
-The adapter requires a composite index on the `verification` collection. Choose one of the following methods:
+> **No composite index is required.** As of v1.1, the adapter sorts filtered queries — including verification-token lookups — in memory, so Firestore's automatic single-field indexes are sufficient. You can skip straight to the next step.
 
-**Option A: Create via Firebase Console (Recommended)**
+If you're upgrading from an earlier version that required a composite index on the verification collection (`identifier` ASC, `createdAt` DESC), you can safely leave that index in place or delete it — the adapter no longer depends on it.
 
-You can generate a direct link that pre-fills the index creation form:
-
-```ts
-import { generateIndexSetupUrl } from "better-auth-firestore";
-
-// Generate the URL (pre-fills the form automatically)
-const url = generateIndexSetupUrl(
-  process.env.FIREBASE_PROJECT_ID!,
-  "(default)", // or your database ID if using a named database
-  "verification" // or your custom collection name
-);
-
-console.log("Open this URL to create the index:", url);
-```
-
-Or manually:
-1. Open: `https://console.firebase.google.com/project/YOUR_PROJECT_ID/firestore/indexes`
-2. Click "Create Index"
-3. Configure:
-   - **Collection ID:** `verification`
-   - **Fields:**
-     - `identifier` (Ascending)
-     - `createdAt` (Descending)
-     - `__name__` (Descending)
-   - **Query scope:** Collection
-4. Click "Create" and wait for the index to build (usually a few minutes)
-
-**Option B: Use firestore.indexes.json Template**
-
-1. Copy `firestore.indexes.json` from `node_modules/better-auth-firestore/` to your project root
-2. (Optional) Update collection name if using custom `collections.verificationTokens`
-3. Deploy: `firebase deploy --only firestore:indexes`
-
-> **Note:** If you're using a custom collection name for verification tokens (via `collections.verificationTokens`), replace `verification` with your custom collection name in the index configuration.
+The `generateIndexSetupUrl` / `getIndexConfig` helpers and the bundled `firestore.indexes.json` are still exported for advanced setups (for example, if you run your own `where` + `orderBy` queries directly against the verification collection outside the adapter). They default to the `verificationTokens` collection; pass `"verification_tokens"` when using the snake_case naming strategy, or your custom collection name.
 
 ### 4. Generate Service Account Key
 
@@ -257,7 +224,7 @@ The adapter maintains the same data shape as Auth.js/NextAuth for seamless migra
 
 > **Defaults:** Collections default to `users`, `sessions`, `accounts`, `verification_tokens` (snake_case) / `verificationTokens` (default). See [Options](#options) to customize collection names.
 >
-> **Note:** The `verification` collection requires a composite index on `identifier` (ASC), `createdAt` (DESC), `__name__` (DESC). See [Firebase Setup - Step 3](#3-create-required-firestore-index) for setup instructions.
+> **Note:** No composite index is required. Verification-token lookups are sorted in memory. See [Firebase Setup - Step 3](#3-firestore-index-optional) for details.
 
 ### Minimal Firestore Security Rules (server/admin only)
 
@@ -452,20 +419,18 @@ See also the [AI Assistant Skill](#ai-assistant-skill) — agents use it to avoi
 
 **Fix:** Use the Firestore Emulator and set `FIRESTORE_EMULATOR_HOST=localhost:8080` before running your app. See [Using the Firestore Emulator](#using-the-firestore-emulator) for setup instructions. The [AI Assistant Skill](#ai-assistant-skill) includes emulator commands for agents.
 
-### Error: Missing or insufficient permissions / Index required
+### Error: `9 FAILED_PRECONDITION: The query requires an index`
 
-**Symptom:** Queries on verification tokens fail with errors about missing index or insufficient permissions.
+**Symptom:** Queries on verification tokens fail with a `FAILED_PRECONDITION` / "The query requires an index" error (often surfaced by Better Auth as `Failed to parse state`).
 
-**Fix:** Create the required composite index on the `verification` collection. See [Firebase Setup - Step 3](#3-create-required-firestore-index) for detailed instructions.
+**Fix:** Upgrade to `better-auth-firestore` v1.1 or later. Older versions issued a `where` + `orderBy` query that required a composite index; the adapter now sorts filtered queries in memory, so no index is needed. After upgrading, the error disappears and any previously created composite index can be removed.
 
-You can generate a direct link using:
+If you cannot upgrade immediately, create the index from the URL in the error message, or generate it with:
 ```ts
 import { generateIndexSetupUrl } from "better-auth-firestore";
 const url = generateIndexSetupUrl(process.env.FIREBASE_PROJECT_ID!);
 console.log(url); // Open this URL to create the index
 ```
-
-The [AI Assistant Skill](#ai-assistant-skill) documents index fields and `generateIndexSetupUrl` for agent-driven setup.
 
 ## FAQ
 
@@ -481,15 +446,15 @@ Yes. `better-auth-firestore` is designed as a drop-in replacement for the Auth.j
 
 This package supports any server-side Node.js runtime: Next.js on Vercel (the default serverless runtime), Cloud Functions, Cloud Run, and standalone Node.js. The only restriction is the Edge Runtime — if you explicitly set `export const runtime = 'edge'` on a route, the Firebase Admin SDK will not load. Standard Vercel deployments are fully supported. See [Runtime compatibility](#runtime-compatibility) for the full matrix. Agents should follow the runtime table in the [AI Assistant Skill](#ai-assistant-skill).
 
-### Why is a Firestore composite index required for verification tokens?
+### Do I need a Firestore composite index for verification tokens?
 
-Better Auth verification token lookups require a Firestore query pattern that depends on a composite index. Without that index, verification-related queries can fail with a missing index error or insufficient permissions message. See [Create Required Firestore Index](#3-create-required-firestore-index) for the exact fields and setup options. The [AI Assistant Skill](#ai-assistant-skill) documents index creation and `generateIndexSetupUrl`.
+No. Better Auth's verification-token lookup filters by `identifier` and orders by `createdAt`, which historically required a composite index. As of v1.1 the adapter applies the filter server-side and sorts the (small, per-identifier) result set in memory, so no composite index is required. See [Firestore Index (Optional)](#3-firestore-index-optional) for the optional tooling that remains available.
 
 ## AI Assistant Skill
 
 The agent skill lives at [`skills/firestore-better-auth/SKILL.md`](./skills/firestore-better-auth/SKILL.md). It works with Cursor, Claude Code, Codex, Copilot, Windsurf, and [70+ other agents](https://skills.sh) via the [skills.sh](https://skills.sh) ecosystem.
 
-The skill teaches AI assistants the correct setup, required Firestore index, environment variable handling, and common gotchas. It also triggers when you ask about using Firestore with Better Auth, migrating from Auth.js/NextAuth, or troubleshooting `FIREBASE_PRIVATE_KEY` issues.
+The skill teaches AI assistants the correct setup, environment variable handling, and common gotchas. It also triggers when you ask about using Firestore with Better Auth, migrating from Auth.js/NextAuth, or troubleshooting `FIREBASE_PRIVATE_KEY` issues.
 
 ```bash
 npx skills add yultyyev/better-auth-firestore
@@ -515,6 +480,10 @@ Install works today from GitHub. The [skills.sh listing page](https://skills.sh/
 ```bash
 pnpm build
 ```
+
+## Reporting issues
+
+Found a bug? First make sure you're on the latest version, then [open an issue](https://github.com/yultyyev/better-auth-firestore/issues) with the package version and a minimal repro. Please redact secrets and PII (Firebase project IDs, `FIREBASE_PRIVATE_KEY`, tokens, and `create_composite` index URLs).
 
 ## Contributing
 
