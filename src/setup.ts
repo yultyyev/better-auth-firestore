@@ -1,17 +1,23 @@
 /**
- * Generate a Firebase Console URL for creating the required Firestore composite index.
- * This URL will pre-fill the index creation form with the correct configuration,
- * similar to the URLs provided in Firestore error messages.
+ * Generate a Firebase Console URL for creating a Firestore composite index on
+ * the verification collection.
+ *
+ * NOTE: As of v1.1, this index is **optional**. The adapter no longer issues
+ * the filter + `orderBy` query shape that requires a composite index — filtered
+ * queries are sorted in memory instead. This helper is kept for consumers who
+ * still want the index for performance on very large verification collections.
  *
  * @param projectId - Your Firebase project ID
  * @param databaseId - Your Firestore database ID (defaults to "(default)")
- * @param collectionName - The collection name (defaults to "verification")
+ * @param collectionName - The verification collection name. Defaults to
+ *   "verificationTokens" (the adapter's default). Pass "verification_tokens"
+ *   for the snake_case naming strategy, or your custom collection name.
  * @returns A Firebase Console URL with pre-filled index configuration
  */
 export function generateIndexSetupUrl(
 	projectId: string,
 	databaseId: string = "(default)",
-	collectionName: string = "verification",
+	collectionName: string = "verificationTokens",
 ): string {
 	// For protobuf, use the original format (keep (default) as-is)
 	const protobufDatabaseId = databaseId;
@@ -79,9 +85,13 @@ export function generateIndexSetupUrl(
 
 /**
  * Get the index configuration object for the verification collection.
- * This can be used to create firestore.indexes.json file.
+ * This can be used to create a firestore.indexes.json file.
+ *
+ * As of v1.1 this index is optional (see {@link generateIndexSetupUrl}).
+ * Defaults to "verificationTokens" to match the adapter's default collection
+ * name; pass "verification_tokens" for the snake_case strategy.
  */
-export function getIndexConfig(collectionName: string = "verification") {
+export function getIndexConfig(collectionName: string = "verificationTokens") {
 	return {
 		indexes: [
 			{

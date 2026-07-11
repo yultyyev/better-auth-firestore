@@ -1510,15 +1510,9 @@ export const firestoreAdapter: (
 						// Fetch results for each OR group
 						const allResultsMap = new Map<string, any>();
 						for (const group of orGroups) {
-							let q = applyWhereClause(col, group, mapper);
-
-							// Apply sorting before fetching
-							if (sortBy?.field) {
-								const fieldName = mapper.toDb(sortBy.field);
-								const direction = sortBy.direction === "desc" ? "desc" : "asc";
-								q = q.orderBy(fieldName, direction);
-							}
-
+							// Results are merged and sorted in memory below, so we skip
+							// Firestore's orderBy to avoid composite-index requirements.
+							const q = applyWhereClause(col, group, mapper);
 							const snap = await q.get();
 							snap.docs.forEach((d) => {
 								const data = d.data();
@@ -1620,16 +1614,13 @@ export const firestoreAdapter: (
 									? { ...w, value: chunk as WhereCondition["value"] }
 									: w,
 							);
-							let cq: FirebaseFirestore.Query = applyWhereClause(
+							// Results are merged and sorted in memory below, so we skip
+							// Firestore's orderBy to avoid composite-index requirements.
+							const cq: FirebaseFirestore.Query = applyWhereClause(
 								col,
 								chunkedWhere,
 								mapper,
 							);
-							if (sortBy?.field) {
-								const fieldName = mapper.toDb(sortBy.field);
-								const direction = sortBy.direction === "desc" ? "desc" : "asc";
-								cq = cq.orderBy(fieldName, direction);
-							}
 							const csnap = await cq.get();
 							for (const d of csnap.docs) {
 								const data = d.data();
@@ -1692,12 +1683,8 @@ export const firestoreAdapter: (
 							q = applyWhereClause(col, whereWithoutContains, mapper);
 						}
 
-						if (sortBy?.field) {
-							const fieldName = mapper.toDb(sortBy.field);
-							const direction = sortBy.direction === "desc" ? "desc" : "asc";
-							q = q.orderBy(fieldName, direction);
-						}
-
+						// Results are filtered and sorted in memory below, so we skip
+						// Firestore's orderBy to avoid composite-index requirements.
 						const snap = await q.get();
 						let results = snap.docs.map((d) => {
 							const data = d.data();
@@ -1758,8 +1745,43 @@ export const firestoreAdapter: (
 						return results as any[];
 					}
 
-					// No client-side filtering needed - use Firestore offset/limit directly
-					// Firestore requires orderBy before using offset
+					// No client-side filtering needed.
+					//
+					// When a query pairs a `where` filter with a `sortBy` on a
+					// different field, Firestore demands a composite index — this is
+					// exactly the verification-token lookup better-auth performs
+					// (`identifier ==` ordered by `createdAt desc`). Instead of
+					// forcing every consumer to provision that index, we let
+					// Firestore apply the filter server-side (covered by automatic
+					// single-field indexes) and sort the already-narrowed matches in
+					// memory. This mirrors the transaction `findMany` path.
+					const hasWhereFilter = !!(where && where.length > 0);
+					if (sortBy?.field && hasWhereFilter) {
+						const filteredSnap = await q.get();
+						let ordered = filteredSnap.docs.map((d) => {
+							const data = d.data();
+							const result: any = { id: d.id };
+							for (const [k, v] of Object.entries(data)) {
+								result[mapper.fromDb(k)] = convertTimestamp(v);
+							}
+							return result;
+						});
+						ordered.sort((a: any, b: any) => {
+							const aVal = a[sortBy.field];
+							const bVal = b[sortBy.field];
+							const dir = sortBy.direction === "desc" ? -1 : 1;
+							if (aVal < bVal) return -1 * dir;
+							if (aVal > bVal) return 1 * dir;
+							return 0;
+						});
+						if (offset) ordered = ordered.slice(offset);
+						if (limit) ordered = ordered.slice(0, limit);
+						return ordered as any[];
+					}
+
+					// No filter (or no sort): a lone `orderBy`/offset is served by an
+					// automatic single-field index, so Firestore can page natively.
+					// Firestore requires orderBy before using offset.
 					if (offset && !sortBy?.field) {
 						// If offset is provided but no sortBy, order by document ID for consistent results
 						q = q.orderBy(FieldPath.documentId());

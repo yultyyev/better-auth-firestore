@@ -89,32 +89,13 @@ export const auth = betterAuth({
 
 ---
 
-## Required Firestore composite index
+## Firestore composite index — not required (v1.1+)
 
-The adapter requires a composite index on the `verification` collection for token lookups. Without it, Better Auth sign-in verification will fail.
+No composite index is required. The adapter never combines a `where` filter with a Firestore `orderBy`: it applies the filter server-side and sorts the results in memory. Verification-token lookups (`identifier ==` ordered by `createdAt desc`) work with Firestore's automatic single-field indexes alone.
 
-**Quick setup — generate the Firebase Console URL:**
+**If sign-in fails with `9 FAILED_PRECONDITION: The query requires an index`** (Better Auth may surface this as `Failed to parse state`), you are on an older version. **Upgrade to v1.1 or later** — do not create the index. Any composite index created for a previous version can be removed afterward.
 
-```ts
-import { generateIndexSetupUrl } from "better-auth-firestore";
-const url = generateIndexSetupUrl(process.env.FIREBASE_PROJECT_ID!);
-console.log(url); // Open to auto-fill the index form
-```
-
-**Or deploy via CLI:**
-
-Copy `firestore.indexes.json` from `node_modules/better-auth-firestore/` to your project root, then:
-
-```bash
-firebase deploy --only firestore:indexes
-```
-
-**Index fields:**
-- Collection: `verification`
-- `identifier` (Ascending)
-- `createdAt` (Descending)
-- `__name__` (Descending)
-- Query scope: Collection
+**Optional tooling** (only for advanced setups that query the verification collection directly, outside the adapter): `generateIndexSetupUrl(projectId, databaseId?, collectionName?)` and `getIndexConfig(collectionName?)`, plus the bundled `firestore.indexes.json`. These default to the `verificationTokens` collection (use `verification_tokens` for the snake_case strategy).
 
 ---
 
@@ -204,7 +185,19 @@ No credentials or service account needed when using the emulator.
 
 ## Common mistakes
 
-- **Missing Firestore composite index** — Verification token queries fail with "index required" or "insufficient permissions". Run `generateIndexSetupUrl` to get the setup link.
+- **`The query requires an index` on verification tokens** — You're on a version older than v1.1. Upgrade `better-auth-firestore`; the adapter now sorts filtered queries in memory and needs no composite index.
 - **FIREBASE_PRIVATE_KEY with literal `\n`** — Always call `.replace(/\\n/g, "\n")` on the key before passing to `cert()`.
 - **Using at edge runtime** — Firebase Admin SDK does not run on Vercel Edge or Cloudflare Workers. Use Node.js runtimes only.
 - **Deprecated scoped package** — Use `better-auth-firestore` (unscoped). The `@yultyyev/better-auth-firestore` package is deprecated.
+
+---
+
+## Reporting issues
+
+If behavior still looks like a library bug after checking the mistakes above:
+
+1. First confirm the project is on the **latest version** — many reports (e.g. the composite-index error) are already fixed.
+2. Only file an issue when the **user explicitly asks** — never open one autonomously.
+3. **Redact secrets and PII** before filing: Firebase project IDs, `FIREBASE_PRIVATE_KEY`, tokens, and any `create_composite` index URL (it encodes the project path). Include the package version and a minimal repro instead.
+
+Issues: https://github.com/yultyyev/better-auth-firestore/issues
