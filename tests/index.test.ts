@@ -679,6 +679,181 @@ describe("Transaction buffering (regression for #24)", () => {
 		expect(observedAfterConsume).toBeNull();
 	});
 
+	// `updateMany` was missing from the tx adapter entirely. better-auth's
+	// `incrementOne` fallback is `transaction(findMany + updateMany)`, so the
+	// database-backed rate limiter threw `updateMany is not a function` and
+	// every rate-limited auth route returned 500.
+	it("updateMany inside a transaction updates all matching docs on flush", async () => {
+		const seedRef1 = db.collection(TX_COLLECTIONS.users).doc();
+		const seedRef2 = db.collection(TX_COLLECTIONS.users).doc();
+		await seedRef1.set({ email: "bulk@example.com", name: "before" });
+		await seedRef2.set({ email: "bulk@example.com", name: "before" });
+
+		const count = await adapter.transaction(async (tx: any) => {
+			return tx.updateMany({
+				model: "user",
+				where: [{ field: "email", operator: "eq", value: "bulk@example.com" }],
+				update: { name: "after" },
+			});
+		});
+		expect(count).toBe(2);
+
+		const [after1, after2] = await Promise.all([
+			seedRef1.get(),
+			seedRef2.get(),
+		]);
+		expect(after1.data()?.name).toBe("after");
+		expect(after2.data()?.name).toBe("after");
+		// The update mask must not clobber untouched fields.
+		expect(after1.data()?.email).toBe("bulk@example.com");
+	});
+
+	it("updateMany inside a transaction returns 0 when nothing matches", async () => {
+		const count = await adapter.transaction(async (tx: any) => {
+			return tx.updateMany({
+				model: "user",
+				where: [
+					{ field: "email", operator: "eq", value: "nobody@example.com" },
+				],
+				update: { name: "after" },
+			});
+		});
+		// better-auth's incrementOne fallback reads a 0 here as "the CAS guard
+		// failed", which is what makes the rate limiter reject a request.
+		expect(count).toBe(0);
+	});
+
+	it("updateMany inside a transaction folds in creates staged earlier in the same transaction", async () => {
+		const count = await adapter.transaction(async (tx: any) => {
+			await tx.create({
+				model: "user",
+				data: { email: "staged-update@example.com", name: "before" },
+			});
+			return tx.updateMany({
+				model: "user",
+				where: [
+					{
+						field: "email",
+						operator: "eq",
+						value: "staged-update@example.com",
+					},
+				],
+				update: { name: "after" },
+			});
+		});
+		expect(count).toBe(1);
+
+		const users = await db
+			.collection(TX_COLLECTIONS.users)
+			.where("email", "==", "staged-update@example.com")
+			.get();
+		expect(users.size).toBe(1);
+		expect(users.docs[0]?.data().name).toBe("after");
+	});
+
+	// The subtle half of the rate-limiter bug. better-auth's `incrementOne`
+	// fallback appends `{field: "id", operator: "eq"}` to its compare-and-swap
+	// guard. Firestore document IDs are metadata, not fields, so routing that
+	// through `.where("id", "==", ...)` matches nothing — updateMany returned 0,
+	// the CAS was read as "someone else won the race", and the limiter denied
+	// every single request while never incrementing the counter.
+	it("updateMany inside a transaction resolves an `id` condition as a doc ref, not a field", async () => {
+		const seedRef = db.collection(TX_COLLECTIONS.users).doc();
+		await seedRef.set({ email: "cas@example.com", name: "before", count: 1 });
+
+		const count = await adapter.transaction(async (tx: any) => {
+			return tx.updateMany({
+				model: "user",
+				where: [
+					{ field: "email", operator: "eq", value: "cas@example.com" },
+					{ field: "count", operator: "lt", value: 3 },
+					{ field: "id", operator: "eq", value: seedRef.id },
+				],
+				update: { name: "after", count: 2 },
+			});
+		});
+		expect(count).toBe(1);
+
+		const after = await seedRef.get();
+		expect(after.data()?.name).toBe("after");
+		expect(after.data()?.count).toBe(2);
+	});
+
+	it("updateMany with an `id` condition still honours the other conditions", async () => {
+		const seedRef = db.collection(TX_COLLECTIONS.users).doc();
+		await seedRef.set({ email: "cas2@example.com", name: "before", count: 9 });
+
+		const count = await adapter.transaction(async (tx: any) => {
+			return tx.updateMany({
+				model: "user",
+				where: [
+					// Guard fails: count is 9, not < 3.
+					{ field: "count", operator: "lt", value: 3 },
+					{ field: "id", operator: "eq", value: seedRef.id },
+				],
+				update: { name: "after" },
+			});
+		});
+		expect(count).toBe(0);
+
+		const after = await seedRef.get();
+		expect(after.data()?.name).toBe("before");
+	});
+
+	it("updateMany with an `id` condition returns 0 for a missing doc", async () => {
+		const count = await adapter.transaction(async (tx: any) => {
+			return tx.updateMany({
+				model: "user",
+				where: [{ field: "id", operator: "eq", value: "does-not-exist" }],
+				update: { name: "after" },
+			});
+		});
+		expect(count).toBe(0);
+	});
+
+	it("updateMany inside a transaction skips docs already staged for delete", async () => {
+		const seedRef = db.collection(TX_COLLECTIONS.users).doc();
+		await seedRef.set({ email: "deleted@example.com", name: "before" });
+
+		const count = await adapter.transaction(async (tx: any) => {
+			await tx.deleteMany({
+				model: "user",
+				where: [
+					{ field: "email", operator: "eq", value: "deleted@example.com" },
+				],
+			});
+			return tx.updateMany({
+				model: "user",
+				where: [
+					{ field: "email", operator: "eq", value: "deleted@example.com" },
+				],
+				update: { name: "after" },
+			});
+		});
+		expect(count).toBe(0);
+
+		const after = await seedRef.get();
+		expect(after.exists).toBe(false);
+	});
+
+	it("updateMany inside a transaction is visible to a later read in the same transaction", async () => {
+		const seedRef = db.collection(TX_COLLECTIONS.users).doc();
+		await seedRef.set({ email: "ryw@example.com", name: "before" });
+
+		const observed = await adapter.transaction(async (tx: any) => {
+			await tx.updateMany({
+				model: "user",
+				where: [{ field: "email", operator: "eq", value: "ryw@example.com" }],
+				update: { name: "after" },
+			});
+			return tx.findOne({
+				model: "user",
+				where: [{ field: "email", operator: "eq", value: "ryw@example.com" }],
+			});
+		});
+		expect(observed.name).toBe("after");
+	});
+
 	it("deleteMany inside a transaction removes all matching docs on flush", async () => {
 		const seedRef1 = db.collection(TX_COLLECTIONS.users).doc();
 		const seedRef2 = db.collection(TX_COLLECTIONS.users).doc();
@@ -807,5 +982,61 @@ describe("Transaction buffering (regression for #24)", () => {
 
 		const persisted = await seedRef.get();
 		expect(persisted.exists).toBe(true);
+	});
+});
+
+// The non-transactional `updateMany` carried the same latent flaw as the tx
+// one: `id` routed through `.where("id", "==", ...)` matches nothing, because
+// Firestore document IDs are metadata rather than a field. Nothing in
+// better-auth exercised this path during the rate-limiter incident, but the
+// silent no-op is identical.
+describe("Non-transactional updateMany with an `id` condition", () => {
+	const db = initFirestore({ name: "test-um", projectId: "test" });
+	const UM_COLLECTIONS = {
+		users: "um_users",
+		sessions: "um_sessions",
+		accounts: "um_accounts",
+		verificationTokens: "um_verificationTokens",
+	};
+	const adapter = firestoreAdapter({
+		firestore: db,
+		collections: UM_COLLECTIONS,
+	})({}) as any;
+
+	afterEach(async () => {
+		for (const col of Object.values(UM_COLLECTIONS)) {
+			const snap = await db.collection(col).get();
+			await Promise.all(snap.docs.map((d) => d.ref.delete()));
+		}
+	});
+
+	it("resolves the `id` condition as a doc ref", async () => {
+		const ref = db.collection(UM_COLLECTIONS.users).doc();
+		await ref.set({ email: "um@example.com", name: "before" });
+
+		const count = await adapter.updateMany({
+			model: "user",
+			where: [{ field: "id", operator: "eq", value: ref.id }],
+			update: { name: "after" },
+		});
+		expect(count).toBe(1);
+		expect((await ref.get()).data()?.name).toBe("after");
+	});
+
+	it("still honours the other conditions alongside `id`", async () => {
+		const ref = db.collection(UM_COLLECTIONS.users).doc();
+		await ref.set({ email: "um2@example.com", name: "before" });
+
+		const count = await adapter.updateMany({
+			model: "user",
+			where: [
+				// Guard fails: the row's email is um2@, not someone-else@.
+				{ field: "email", operator: "eq", value: "someone-else@example.com" },
+				{ field: "id", operator: "eq", value: ref.id },
+			],
+			update: { name: "after" },
+		});
+		expect(count).toBe(0);
+		expect((await ref.get()).data()?.name).toBe("before");
 	});
 });
