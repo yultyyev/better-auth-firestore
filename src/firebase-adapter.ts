@@ -580,6 +580,27 @@ async function lookupTxDoc(
 	return undefined;
 }
 
+/**
+ * Splits an `id` equality condition out of a where clause.
+ *
+ * Firestore document IDs are metadata, not fields, so `where("id", "==", …)`
+ * silently matches nothing. Callers must resolve the doc by ref and evaluate
+ * the remaining conditions themselves — see `lookupTxDoc` for the
+ * single-condition version of the same problem.
+ */
+function splitIdEqCondition(where: WhereCondition[] | undefined): {
+	id?: string;
+	rest: WhereCondition[] | undefined;
+} {
+	if (!where || where.length === 0) return { rest: where };
+	const idCond = where.find(
+		(w) => w.field === "id" && (w.operator === "eq" || !w.operator),
+	);
+	if (!idCond || typeof idCond.value !== "string") return { rest: where };
+	const rest = where.filter((w) => w !== idCond);
+	return { id: idCond.value, rest: rest.length > 0 ? rest : undefined };
+}
+
 /** Convert a Firestore document body (db-side keys, Timestamps) to app shape. */
 function dbDataToAppData(
 	data: Record<string, any>,
@@ -770,6 +791,111 @@ export const firestoreAdapter: (
 							if (offset) results = results.slice(offset);
 							if (limit !== undefined) results = results.slice(0, limit);
 							return results;
+						},
+						// Mirrors the non-tx `updateMany`, but stages every write in the
+						// buffer so reads later in the same transaction observe them and
+						// the flush emits one write per ref.
+						//
+						// better-auth reaches this through `incrementOne`: adapters
+						// without a native implementation fall back to
+						// `transaction(findMany + updateMany)`, which is how the
+						// database-backed rate limiter counts a request. Without this
+						// method that fallback threw `updateMany is not a function` and
+						// every rate-limited route 500'd.
+						//
+						// Returns the number of affected docs — the fallback re-applies
+						// the caller's `where` here as a compare-and-swap guard and
+						// treats a zero count as "someone else won the race".
+						updateMany: async ({ model, where, update }: any) => {
+							const col = getCollectionRef(db, model, collections);
+							const normalizedUpdate = normalizeWriteData(model, update);
+							const { docData: updateData } = buildFirestoreWriteData(
+								normalizedUpdate,
+								mapper,
+							);
+							let count = 0;
+							const seenPaths = new Set<string>();
+
+							/** Merge into an existing staged write, or stage a fresh one. */
+							const applyTo = (
+								ref: FirebaseFirestore.DocumentReference,
+								baseAppData: Record<string, any>,
+							) => {
+								const existing = buffer.getByPath(ref.path);
+								if (existing && existing.op !== "delete") {
+									Object.assign(existing.docData, updateData);
+									Object.assign(existing.appData, normalizedUpdate);
+								} else {
+									buffer.stageUpdate(
+										model,
+										ref,
+										updateData,
+										normalizedUpdate,
+										baseAppData,
+									);
+								}
+								count++;
+							};
+
+							// `id` can't go through a Firestore query — it's document
+							// metadata, not a field. better-auth's `incrementOne` fallback
+							// appends exactly such a condition to its compare-and-swap
+							// guard, so without this branch every increment matched zero
+							// docs and the rate limiter denied every request.
+							const { id: idFilter, rest } = splitIdEqCondition(where);
+							if (idFilter) {
+								const ref = col.doc(idFilter);
+								if (buffer.isDeleted(ref.path)) return 0;
+								const staged = buffer.getByPath(ref.path);
+								if (staged && staged.op !== "delete") {
+									if (matchesWhere(staged.appData, rest)) applyTo(ref, {});
+									return count;
+								}
+								const snap = await transaction.get(ref);
+								if (!snap.exists) return 0;
+								const appData = {
+									id: snap.id,
+									...dbDataToAppData(snap.data() ?? {}, mapper),
+								};
+								if (matchesWhere(appData, rest)) applyTo(ref, appData);
+								return count;
+							}
+
+							// 1. Real reads (chunked for oversized `in` clauses). A staged
+							//    delete hides the doc; an existing staged write merges in
+							//    place, mirroring step 3 of the single-doc `update`.
+							for (const whereClause of getChunkedWhereClauses(where)) {
+								const q = applyWhereClause(col, whereClause, mapper);
+								const snap = await transaction.get(q);
+								for (const doc of snap.docs) {
+									if (
+										seenPaths.has(doc.ref.path) ||
+										buffer.isDeleted(doc.ref.path)
+									)
+										continue;
+									seenPaths.add(doc.ref.path);
+									applyTo(doc.ref, dbDataToAppData(doc.data() ?? {}, mapper));
+								}
+							}
+
+							// 2. Staged creates are invisible to Firestore queries until
+							//    flush, so fold them in by hand. Mutating in place keeps
+							//    the entry a `create`, so the flush still emits one `set`.
+							for (const entry of buffer.values()) {
+								if (entry.op !== "create" || entry.model !== model) continue;
+								if (
+									seenPaths.has(entry.ref.path) ||
+									buffer.isDeleted(entry.ref.path)
+								)
+									continue;
+								if (!matchesWhere(entry.appData, where)) continue;
+								seenPaths.add(entry.ref.path);
+								Object.assign(entry.docData, updateData);
+								Object.assign(entry.appData, normalizedUpdate);
+								count++;
+							}
+
+							return count;
 						},
 						deleteMany: async ({ model, where }: any) => {
 							const col = getCollectionRef(db, model, collections);
@@ -1023,6 +1149,23 @@ export const firestoreAdapter: (
 						normalizedUpdate,
 						mapper,
 					);
+
+					// Same metadata-not-a-field constraint the tx path handles: an
+					// `id` condition has to resolve to a doc ref, with the remaining
+					// conditions checked in memory.
+					const { id: idFilter, rest } = splitIdEqCondition(where);
+					if (idFilter) {
+						const snap = await col.doc(idFilter).get();
+						if (!snap.exists) return 0;
+						const appData = {
+							id: snap.id,
+							...dbDataToAppData(snap.data() ?? {}, mapper),
+						};
+						if (!matchesWhere(appData, rest)) return 0;
+						await snap.ref.update(updateData);
+						return 1;
+					}
+
 					for (const whereClause of getChunkedWhereClauses(where)) {
 						const q = applyWhereClause(col, whereClause, mapper);
 						const snap = await q.get();

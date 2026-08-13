@@ -126,7 +126,16 @@ export const auth = betterAuth({
 
 ### 3. Firestore Index (Optional)
 
-> **No composite index is required.** As of v1.1, the adapter sorts filtered queries — including verification-token lookups — in memory, so Firestore's automatic single-field indexes are sufficient. You can skip straight to the next step.
+> **No composite index is required for the adapter's own queries.** As of v1.1, the adapter sorts filtered queries — including verification-token lookups — in memory, so Firestore's automatic single-field indexes are sufficient.
+
+> [!IMPORTANT]
+> **One exception: `rateLimit.storage: "database"`.** Better Auth's database-backed rate limiter issues its own queries against a `rateLimit` collection, and those *do* need composite indexes. Without them every rate-limited auth route fails with `9 FAILED_PRECONDITION` — surfacing as a 500 on sign-in. Deploy the bundled [`firestore.indexes.json`](./firestore.indexes.json) before enabling it:
+>
+> ```bash
+> firebase deploy --only firestore:indexes
+> ```
+>
+> Two indexes on `rateLimit` are needed, matching the limiter's two increment paths — `key`/`lastRequest` for the window-expired reset, and `key`/`count`/`lastRequest` for the in-window increment (two inequality fields, so Firestore requires both in the index).
 
 If you're upgrading from an earlier version that required a composite index on the verification collection (`identifier` ASC, `createdAt` DESC), you can safely leave that index in place or delete it — the adapter no longer depends on it.
 
@@ -431,6 +440,14 @@ import { generateIndexSetupUrl } from "better-auth-firestore";
 const url = generateIndexSetupUrl(process.env.FIREBASE_PROJECT_ID!);
 console.log(url); // Open this URL to create the index
 ```
+
+### Error: `updateMany is not a function`, or every sign-in returns 429
+
+**Symptom:** With `rateLimit.storage: "database"`, auth routes return 500 with `TypeError: updateMany is not a function` — or, on a partially-patched version, every request is rate limited even when the counter never rises.
+
+**Fix:** Upgrade to a version that implements `updateMany` on the transaction adapter, **and deploy the `rateLimit` composite indexes** (see [Firestore Index](#3-firestore-index-optional)). Both are required: the code fix alone still fails in production with `9 FAILED_PRECONDITION`, because the limiter's in-window guard filters on two inequality fields.
+
+Note that Firestore emulators do **not** enforce composite indexes, so this failure will not reproduce in local tests — only against a real Firestore instance.
 
 ## FAQ
 
