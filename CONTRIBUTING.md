@@ -63,6 +63,11 @@ When contributing to Better Auth Firestore:
    pnpm test
    ```
 
+8. If you touch packaging (`package.json` `exports`/`main`/`files`, `tsconfig.build.json`, or anything under `dist/`), also run the packaging smoke test. It packs the tarball, installs it into a scratch consumer next to the peer dependencies, and checks that `import()`, `require()`, and the types all resolve — the unit tests import from `src/`, so nothing else covers what npm publishes:
+   ```bash
+   pnpm build && pnpm verify:pack
+   ```
+
 ## Code Formatting with BiomeJS
 
 We use [BiomeJS](https://biomejs.dev/) for code formatting and linting. Before committing, please ensure your code is properly formatted:
