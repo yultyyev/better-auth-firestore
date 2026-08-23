@@ -107,9 +107,12 @@ pnpm install       # Install dependencies
 pnpm build         # Build the project (outputs to dist/)
 pnpm typecheck     # Typecheck src + tests without emitting
 pnpm test          # Run tests (requires FIRESTORE_EMULATOR_HOST)
+pnpm verify:pack   # Pack the tarball and import/type-check it from a scratch consumer (after pnpm build)
 pnpm lint          # Check for linting issues
 pnpm lint:fix      # Fix auto-fixable linting issues
 ```
+
+The build emits ESM only; `main` and both `exports["."]` conditions (`import`, `require`) point at `./dist/index.js`, and `require()` works through Node's `require(esm)` (>= 22.12). Never point `main` or `require` at a `.cjs` file — the build does not produce one, and that exact mistake shipped in every release up to 1.2.9. `pnpm verify:pack` is what catches it.
 
 ## Test Setup
 

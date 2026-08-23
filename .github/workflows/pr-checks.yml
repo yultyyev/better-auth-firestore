@@ -56,6 +56,12 @@ jobs:
       - name: Test
         run: pnpm test
 
+      # Packs the tarball and imports/type-checks it from a scratch consumer.
+      # The suite imports from src/, so this is the only step that exercises
+      # what npm actually publishes.
+      - name: Verify packed artifact
+        run: pnpm verify:pack
+
   types:
     name: Types (TypeScript ${{ matrix.typescript }}.x)
     runs-on: ubuntu-latest

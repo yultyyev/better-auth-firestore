@@ -26,6 +26,7 @@
     "build": "tsc -p tsconfig.build.json",
     "clean": "rimraf dist",
     "test": "./tests/test.sh",
+    "verify:pack": "./scripts/verify-pack.sh",
     "lint": "biome check --formatter-enabled=false",
     "lint:fix": "biome check --write",
     "lint:fix:unsafe": "biome check --write --unsafe",
