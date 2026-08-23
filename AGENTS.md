@@ -4,7 +4,7 @@ This document provides additional context for AI assistants working on this proj
 
 ## Quick Reference
 
-- **Package name:** `better-auth-firestore` (unscoped — the scoped `@yultyyev/better-auth-firestore` was unpublished from npm in 2026-08; installs of it 404)
+- **Package name:** `better-auth-firestore`
 - **Main Documentation:** See [README.md](./README.md)
 - **Contributing Guidelines:** See [CONTRIBUTING.md](./CONTRIBUTING.md)
 - **Adapter Guide:** See [Better Auth Adapter Guide](https://www.better-auth.com/docs/guides/create-a-db-adapter)
@@ -88,7 +88,6 @@ Helper (optional, for advanced/direct-query setups only): `generateIndexSetupUrl
 
 - **Edge Runtime not supported** — Firebase Admin SDK requires Node.js. If a route sets `export const runtime = 'edge'`, the Admin SDK will not load. Standard Vercel deployments (Node.js serverless runtime) work fine.
 - **FIREBASE_PRIVATE_KEY newlines** — Environment variables often store the key with literal `\n` strings. Users must call `.replace(/\\n/g, "\n")`.
-- **Scoped package removed** — `@yultyyev/better-auth-firestore` was unpublished from npm (2026-08); fresh installs of it fail with 404. Point users at `better-auth-firestore` — the API is identical, only the import path changes.
 - **Emulator support** — Set `FIRESTORE_EMULATOR_HOST=localhost:8080`; the Admin SDK automatically routes requests there. No credentials needed. The emulator does **not** enforce composite indexes, so index requirements only surface against real Firestore.
 
 ## Sister Package

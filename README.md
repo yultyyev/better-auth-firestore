@@ -5,8 +5,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![skills.sh](https://skills.sh/b/yultyyev/better-auth-firestore)](https://skills.sh/yultyyev/better-auth-firestore)
 
-> **Note:** The old scoped package `@yultyyev/better-auth-firestore` has been removed from npm — installing it now fails with a 404. If a project still references it, switch to `better-auth-firestore`: see [Migration from Scoped Package](#migration-from-scoped-package) below.
-
 **Firestore (Firebase Admin SDK) adapter for Better Auth.** A drop-in replacement for the Auth.js Firebase adapter with matching data shape.
 
 - **Install:** `pnpm add better-auth-firestore firebase-admin better-auth`
