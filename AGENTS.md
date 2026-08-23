@@ -125,7 +125,7 @@ docker run -d --rm -p 8080:8080 google/cloud-sdk:emulators \
 FIRESTORE_EMULATOR_HOST=localhost:8080 pnpm vitest run
 ```
 
-CI runs the suite twice: against the lockfile's Better Auth (1.7) and against the latest 1.6 (`pnpm add -D better-auth@1.6`). Keep both green — the adapter promises to work with either.
+CI runs three things on every PR: the lint/build/test job as a matrix against the lockfile's Better Auth (1.7) and the latest 1.6 (`pnpm add -D better-auth@1.6`), each ending with `pnpm verify:pack`; and a `types` job that typechecks and builds under TypeScript 5, 6 and 7. Keep all of them green — the adapter promises to work with every combination.
 
 ## Commit Messages
 
