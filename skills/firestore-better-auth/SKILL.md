@@ -122,7 +122,7 @@ await backfillAccountIssuers({
 });
 ```
 
-Order: adapter → v1.3, run the backfill, then `better-auth` → 1.7. Full details: https://better-auth.com/docs/guides/1-7-upgrade-guide
+Run the backfill before the first deploy on Better Auth 1.7 (the helper ships in v1.3 and is harmless on 1.6). Full details: https://better-auth.com/docs/guides/1-7-upgrade-guide
 
 ---
 
