@@ -323,7 +323,7 @@ if (result.collisions.length) throw new Error("Resolve duplicate accounts first"
 
 The helper mirrors 1.7's own rules: `credential` → `local:credential` (and repairs `accountId` to equal `userId`), `siwe` → `local:siwe`, everything else → `local:oauth:<encodeURIComponent(providerId)>`, with `issuers` / `resolveIssuer` overrides for providers that publish a real issuer. It is idempotent (stamped documents are skipped), paginates, and reports `(issuer, accountId)` collisions — 1.7 treats that pair as unique, so resolve any before deploying.
 
-Recommended order: upgrade `better-auth-firestore` to v1.3 → run the backfill (dry run, then real) → upgrade `better-auth` to 1.7 and deploy. Once you're on v1.3 you can also delete the `rateLimit` composite indexes; see [Firestore Index](#3-firestore-index-optional).
+Run the backfill (dry run, then real) before your first deploy on Better Auth 1.7; it ships in v1.3 and is harmless on 1.6. Once you're on v1.3 you can also delete the `rateLimit` composite indexes; see [Firestore Index](#3-firestore-index-optional).
 
 > **Plugin authors:** 1.7 removed `internalAdapter.findOAuthUser(email, accountId, providerId)`. Use `findAccountOwnerByKey({ issuer, accountId })` and pass `issuer` to `linkAccount` / `createOAuthUser`. If you use [`better-auth-firebase-auth`](https://github.com/yultyyev/better-auth-firebase-auth), make sure you're on a release that supports Better Auth 1.7.
 
