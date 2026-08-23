@@ -12,10 +12,17 @@ concurrency:
 
 jobs:
   checks:
-    name: Lint, build, test
+    name: Lint, build, test (better-auth ${{ matrix.better-auth }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # "lockfile" runs against the pinned devDependency (1.7.x). The adapter
+        # also supports Better Auth 1.6 from the same codebase, so the suite
+        # runs against the latest 1.6 release too.
+        better-auth: ["lockfile", "1.6"]
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -33,6 +40,12 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Use better-auth ${{ matrix.better-auth }}
+        if: matrix.better-auth != 'lockfile'
+        run: |
+          pnpm add -D better-auth@${{ matrix.better-auth }}
+          node -p "'better-auth ' + require('./node_modules/better-auth/package.json').version"
 
       - name: Lint
         run: pnpm lint

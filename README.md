@@ -10,7 +10,7 @@
 **Firestore (Firebase Admin SDK) adapter for Better Auth.** A drop-in replacement for the Auth.js Firebase adapter with matching data shape.
 
 - **Install:** `pnpm add better-auth-firestore firebase-admin better-auth`
-- **Docs:** [Quickstart](#quick-start) • [Options](#options) • [Migration](#migration-from-authjsnextauth) • [Emulator](#using-the-firestore-emulator)
+- **Docs:** [Quickstart](#quick-start) • [Options](#options) • [Better Auth 1.7 upgrade](#upgrading-to-better-auth-17) • [Migration](#migration-from-authjsnextauth) • [Emulator](#using-the-firestore-emulator)
 - **Example:** See [`/examples/minimal`](./examples/minimal) for a complete Next.js App Router example
 - **AI skill:** [Cursor, Claude Code, Codex & 70+ agents](#ai-assistant-skill) — `npx skills add yultyyev/better-auth-firestore` • [llms.txt](./llms.txt)
 
@@ -126,18 +126,9 @@ export const auth = betterAuth({
 
 ### 3. Firestore Index (Optional)
 
-> **No composite index is required for the adapter's own queries.** As of v1.1, the adapter sorts filtered queries — including verification-token lookups — in memory, so Firestore's automatic single-field indexes are sufficient.
+> **No composite index is required.** As of v1.1, the adapter sorts filtered queries — including verification-token lookups — in memory, so Firestore's automatic single-field indexes are sufficient. As of v1.3 that includes `rateLimit.storage: "database"`: the adapter implements Better Auth's `incrementOne` natively and evaluates the limiter's range guards in memory inside a Firestore transaction, so only an equality filter on `key` ever reaches Firestore.
 
-> [!IMPORTANT]
-> **One exception: `rateLimit.storage: "database"`.** Better Auth's database-backed rate limiter issues its own queries against a `rateLimit` collection, and those *do* need composite indexes. Without them every rate-limited auth route fails with `9 FAILED_PRECONDITION` — surfacing as a 500 on sign-in. Deploy the bundled [`firestore.indexes.json`](./firestore.indexes.json) before enabling it:
->
-> ```bash
-> firebase deploy --only firestore:indexes
-> ```
->
-> Two indexes on `rateLimit` are needed, matching the limiter's two increment paths — `key`/`lastRequest` for the window-expired reset, and `key`/`count`/`lastRequest` for the in-window increment (two inequality fields, so Firestore requires both in the index).
-
-If you're upgrading from an earlier version that required a composite index on the verification collection (`identifier` ASC, `createdAt` DESC), you can safely leave that index in place or delete it — the adapter no longer depends on it.
+If you're upgrading from an earlier version that required composite indexes — on the verification collection (`identifier` ASC, `createdAt` DESC, before v1.1) or on `rateLimit` (`key`/`lastRequest` and `key`/`count`/`lastRequest`, before v1.3) — you can safely leave them in place or delete them; the adapter no longer depends on either.
 
 The `generateIndexSetupUrl` / `getIndexConfig` helpers and the bundled `firestore.indexes.json` are still exported for advanced setups (for example, if you run your own `where` + `orderBy` queries directly against the verification collection outside the adapter). They default to the `verificationTokens` collection; pass `"verification_tokens"` when using the snake_case naming strategy, or your custom collection name.
 
@@ -203,8 +194,9 @@ firestoreAdapter({
 
 | Better Auth | Status | Notes |
 |---|---|---|
-| `^1.5.0` | ✅ Recommended | Uses the latest API and security fixes. |
-| `^1.4.18` | ✅ Supported | Backward-compatible for existing projects. |
+| `^1.7.0` | ✅ Recommended | Requires adapter v1.3+ (native `incrementOne`). Existing deployments must run the [account issuer backfill](#upgrading-to-better-auth-17) first. |
+| `^1.6.0` | ✅ Supported | Tested in CI alongside 1.7; the same adapter release works with both. |
+| `< 1.6` | ⚠️ Not covered by CI | Pin an older adapter release (≤ v1.2) if you need one. |
 
 > **For older projects:** if your app still uses older Better Auth patterns (`createAuth` + `adapter`), this adapter remains compatible, but new projects should use `betterAuth` + `database`.
 
@@ -284,6 +276,41 @@ If you're currently using `@yultyyev/better-auth-firestore`, migrate to `better-
    ```
 
 That's it! The API is identical, so no code changes are needed beyond the import path.
+
+## Upgrading to Better Auth 1.7
+
+Better Auth 1.7 changed how accounts are identified and what it requires from database adapters. Two things matter for Firestore users — read the official [1.7 upgrade guide](https://better-auth.com/docs/guides/1-7-upgrade-guide) for everything else (OAuth provider, SSO, SCIM, MCP, …).
+
+**1. Adapter v1.3+ is required.** 1.7 made `incrementOne` a mandatory adapter method and removed the fallback earlier versions relied on. With adapter ≤ v1.2 on Better Auth 1.7, sign-in still works but every feature built on atomic counters throws `Adapter "firestore" must implement incrementOne` — database-backed rate limiting, organization invitations and team seats, device authorization, and two-factor lockout. v1.3 implements it natively and also works with 1.6, so upgrade the adapter first, independently of Better Auth.
+
+**2. Existing account documents need an `issuer`.** 1.7 identifies an account by the pair `(issuer, accountId)` and stores `issuer` on every new account. Documents written by earlier versions don't have it, so after upgrading, 1.7 can't find them — **existing users can no longer sign in** until the field is backfilled. SQL users get this from `npx auth migrate`; Firestore has no migration runner, so the adapter ships `backfillAccountIssuers`:
+
+```ts
+import { backfillAccountIssuers } from "better-auth-firestore";
+
+// 1. Review the report first.
+console.log(await backfillAccountIssuers({ firestore, dryRun: true }));
+
+// 2. Pause authentication writes, then run for real.
+const result = await backfillAccountIssuers({
+  firestore,
+  // collection: "accounts", namingStrategy: "snake_case" — match your adapter config
+  issuers: {
+    // Only providers that confirm a real issuer. Built-in social providers
+    // (google, github, apple, …) don't — they get `local:oauth:<providerId>`
+    // automatically, which is what 1.7 assigns them.
+    // okta: "https://acme.okta.com",   // generic OAuth with discovery / accountIssuer
+    // google: "https://accounts.google.com", // only if you use the One Tap plugin
+  },
+});
+if (result.collisions.length) throw new Error("Resolve duplicate accounts first");
+```
+
+The helper mirrors 1.7's own rules: `credential` → `local:credential` (and repairs `accountId` to equal `userId`), `siwe` → `local:siwe`, everything else → `local:oauth:<encodeURIComponent(providerId)>`, with `issuers` / `resolveIssuer` overrides for providers that publish a real issuer. It is idempotent (stamped documents are skipped), paginates, and reports `(issuer, accountId)` collisions — 1.7 treats that pair as unique, so resolve any before deploying.
+
+Recommended order: upgrade `better-auth-firestore` to v1.3 → run the backfill (dry run, then real) → upgrade `better-auth` to 1.7 and deploy. Once you're on v1.3 you can also delete the `rateLimit` composite indexes; see [Firestore Index](#3-firestore-index-optional).
+
+> **Plugin authors:** 1.7 removed `internalAdapter.findOAuthUser(email, accountId, providerId)`. Use `findAccountOwnerByKey({ issuer, accountId })` and pass `issuer` to `linkAccount` / `createOAuthUser`. If you use [`better-auth-firebase-auth`](https://github.com/yultyyev/better-auth-firebase-auth), make sure you're on a release that supports Better Auth 1.7.
 
 ## Migration from Auth.js/NextAuth
 
@@ -441,13 +468,25 @@ const url = generateIndexSetupUrl(process.env.FIREBASE_PROJECT_ID!);
 console.log(url); // Open this URL to create the index
 ```
 
-### Error: `updateMany is not a function`, or every sign-in returns 429
+### Error: `updateMany is not a function`, every sign-in returns 429, or `9 FAILED_PRECONDITION` on `rateLimit`
 
-**Symptom:** With `rateLimit.storage: "database"`, auth routes return 500 with `TypeError: updateMany is not a function` — or, on a partially-patched version, every request is rate limited even when the counter never rises.
+**Symptom:** With `rateLimit.storage: "database"`, auth routes return 500 with `TypeError: updateMany is not a function`, every request is rate limited even when the counter never rises, or production fails with `9 FAILED_PRECONDITION: The query requires an index` on the `rateLimit` collection.
 
-**Fix:** Upgrade to a version that implements `updateMany` on the transaction adapter, **and deploy the `rateLimit` composite indexes** (see [Firestore Index](#3-firestore-index-optional)). Both are required: the code fix alone still fails in production with `9 FAILED_PRECONDITION`, because the limiter's in-window guard filters on two inequality fields.
+**Fix:** Upgrade to v1.3 or later. The adapter implements Better Auth's `incrementOne` natively: the limiter's guards are evaluated in memory inside a Firestore transaction, so no composite index is needed anymore. (v1.2.x routed the limiter through a transactional `updateMany` fallback that pushed two inequality filters to Firestore and therefore required the `rateLimit` composite indexes.)
 
-Note that Firestore emulators do **not** enforce composite indexes, so this failure will not reproduce in local tests — only against a real Firestore instance.
+Note that Firestore emulators do **not** enforce composite indexes, so index failures only reproduce against a real Firestore instance.
+
+### Error: `Adapter "firestore" must implement incrementOne for atomic guarded counter updates`
+
+**Symptom:** After upgrading to Better Auth 1.7, rate-limited routes, organization invitations / team seats, device authorization, or two-factor verification throw this error.
+
+**Fix:** Upgrade `better-auth-firestore` to v1.3 or later. Better Auth 1.7 made `incrementOne` a required adapter method and removed the fallback older adapter versions relied on. See [Upgrading to Better Auth 1.7](#upgrading-to-better-auth-17).
+
+### Existing users can't sign in after upgrading to Better Auth 1.7
+
+**Symptom:** Sign-up works, but accounts created before the upgrade fail to sign in (email/password reports invalid credentials; social sign-in reports the account as not linked, or links a duplicate account to the email-matched user).
+
+**Fix:** Run `backfillAccountIssuers` once to stamp the `issuer` field 1.7 uses to look accounts up. See [Upgrading to Better Auth 1.7](#upgrading-to-better-auth-17).
 
 ## FAQ
 
@@ -466,6 +505,10 @@ This package supports any server-side Node.js runtime: Next.js on Vercel (the de
 ### Do I need a Firestore composite index for verification tokens?
 
 No. Better Auth's verification-token lookup filters by `identifier` and orders by `createdAt`, which historically required a composite index. As of v1.1 the adapter applies the filter server-side and sorts the (small, per-identifier) result set in memory, so no composite index is required. See [Firestore Index (Optional)](#3-firestore-index-optional) for the optional tooling that remains available.
+
+### Does the adapter support Better Auth 1.7?
+
+Yes, from v1.3. The same release also works with Better Auth 1.6 (both are tested in CI). If you have existing users, run the account issuer backfill before deploying 1.7 — see [Upgrading to Better Auth 1.7](#upgrading-to-better-auth-17).
 
 ## AI Assistant Skill
 
