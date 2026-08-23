@@ -18,15 +18,18 @@ const COLLECTIONS = {
 
 // A throwaway model so the guards can exercise number, date, and string
 // fields through the real adapter factory (which validates models and
-// drops `set` fields that aren't in the schema). It keeps better-auth's
-// default `modelName` (= the model key): the transaction adapter is handed
-// raw model names by `runWithTransaction`, so a custom `modelName` would not
-// be mapped there.
-const COUNTER_COLLECTION = "counter";
+// drops `set` fields that aren't in the schema). Its `modelName` differs
+// from the model key on purpose: every call below uses the key (`counter`)
+// and must land in the mapped collection — inside transactions too, where
+// `runWithTransaction` hands better-auth whatever our `transaction()`
+// passes to its callback. A raw, unwrapped adapter there would have written
+// to a `counter` collection instead.
+const COUNTER_COLLECTION = "inc_counters";
 const testSchemaPlugin = {
 	id: "inc-test-schema",
 	schema: {
 		counter: {
+			modelName: COUNTER_COLLECTION,
 			fields: {
 				key: { type: "string", required: true },
 				count: { type: "number", required: false },
@@ -276,10 +279,10 @@ describe("incrementOne (native guarded counter mutation)", () => {
 });
 
 describe("incrementOne / delete / count inside a transaction", () => {
-	// `runWithTransaction` hands the raw tx adapter to plugins as the
-	// current adapter, so it needs the same atomic primitives — and they have
-	// to cooperate with the write buffer (read-your-writes, one write per
-	// ref at flush).
+	// `runWithTransaction` hands the (factory-wrapped) tx adapter to plugins
+	// as the current adapter, so it needs the same atomic primitives — and
+	// they have to cooperate with the write buffer (read-your-writes, one
+	// write per ref at flush).
 	const db = initFirestore({ name: "test-inc-tx", projectId: "test" });
 	const counters = db.collection(COUNTER_COLLECTION);
 
