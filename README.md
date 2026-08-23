@@ -322,7 +322,7 @@ The command mirrors 1.7's own rules: `credential` → `local:credential` (and re
 
 Run the backfill (dry run, then real) before your first deploy on Better Auth 1.7; it ships in v1.3 and is harmless on 1.6. Once you're on v1.3 you can also delete the `rateLimit` composite indexes; see [Firestore Index](#3-firestore-index-optional).
 
-> **Plugin authors:** 1.7 removed `internalAdapter.findOAuthUser(email, accountId, providerId)`. Use `findAccountOwnerByKey({ issuer, accountId })` and pass `issuer` to `linkAccount` / `createOAuthUser`. If you use [`better-auth-firebase-auth`](https://github.com/yultyyev/better-auth-firebase-auth), make sure you're on a release that supports Better Auth 1.7.
+> **Plugin authors:** 1.7 removed `internalAdapter.findOAuthUser(email, accountId, providerId)`. Use `findAccountOwnerByKey({ issuer, accountId })` and pass `issuer` to `linkAccount` / `createOAuthUser`. If you use [`better-auth-firebase-auth`](https://github.com/yultyyev/better-auth-firebase-auth), upgrade it to [v2.2.0 or later](https://github.com/yultyyev/better-auth-firebase-auth/releases/tag/v2.2.0) — earlier releases call the removed API and every sign-in fails on 1.7 (one build supports Better Auth 1.5–1.7; [v2.2.1](https://github.com/yultyyev/better-auth-firebase-auth/releases/tag/v2.2.1) adds `npx better-auth-firebase-auth backfill-account-issuers`). Its `providerId: "firebase"` account documents are already covered by the backfill above: the default rule stamps them `local:oauth:firebase`, exactly the issuer that plugin uses.
 
 ## Migration from Auth.js/NextAuth
 
