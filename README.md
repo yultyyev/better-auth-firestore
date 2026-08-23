@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![skills.sh](https://skills.sh/b/yultyyev/better-auth-firestore)](https://skills.sh/yultyyev/better-auth-firestore)
 
-> **Note:** If you're using `@yultyyev/better-auth-firestore`, please migrate to `better-auth-firestore`. The scoped package is deprecated. See [Migration from Scoped Package](#migration-from-scoped-package) below.
+> **Note:** The old scoped package `@yultyyev/better-auth-firestore` has been removed from npm — installing it now fails with a 404. If a project still references it, switch to `better-auth-firestore`: see [Migration from Scoped Package](#migration-from-scoped-package) below.
 
 **Firestore (Firebase Admin SDK) adapter for Better Auth.** A drop-in replacement for the Auth.js Firebase adapter with matching data shape.
 
@@ -281,7 +281,7 @@ This adapter is the Better Auth-native solution for Firestore users, recommended
 
 ## Migration from Scoped Package
 
-If you're currently using `@yultyyev/better-auth-firestore`, migrate to `better-auth-firestore`:
+The scoped package `@yultyyev/better-auth-firestore` was unpublished from npm in August 2026 (it had been deprecated since January). Projects that still reference it keep working from their installed `node_modules`, but any fresh install — a new machine, CI, `rm -rf node_modules` — fails with `404 Not Found`. The fix is a rename; the API is identical:
 
 1. **Update package name in your dependencies:**
    ```bash
