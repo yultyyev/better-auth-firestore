@@ -179,6 +179,8 @@ firestoreAdapter({
 - `accounts`: "accounts"
 - `verificationTokens`: "verification_tokens" (snake_case) or "verificationTokens" (default)
 
+**Custom model names:** a Better Auth `modelName` (for example `user: { modelName: "app_users" }`, or a plugin model) names the Firestore collection directly and takes precedence over `collections`. The mapping is applied consistently, including for operations Better Auth runs inside `adapter.transaction` (such as sign-up).
+
 ### Debug logging
 
 ```ts
