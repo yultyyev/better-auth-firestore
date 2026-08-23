@@ -213,7 +213,7 @@ No credentials or service account needed when using the emulator.
 - **Existing users can't sign in after moving to Better Auth 1.7** — The `account.issuer` backfill was not run (the server log shows a `[better-auth-firestore]` warning with the command). Run `npx better-auth-firestore backfill-account-issuers --apply` (see above).
 - **FIREBASE_PRIVATE_KEY with literal `\n`** — Always call `.replace(/\\n/g, "\n")` on the key before passing to `cert()`.
 - **Using at edge runtime** — Firebase Admin SDK does not run on Vercel Edge or Cloudflare Workers. Use Node.js runtimes only.
-- **Deprecated scoped package** — Use `better-auth-firestore` (unscoped). The `@yultyyev/better-auth-firestore` package is deprecated.
+- **`npm error 404` on `@yultyyev/better-auth-firestore`** — The scoped package was unpublished from npm (2026-08). Switch the dependency and import path to `better-auth-firestore`; the API is identical.
 
 ---
 
