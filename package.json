@@ -16,8 +16,12 @@
       "require": "./dist/index.js"
     }
   },
+  "bin": {
+    "better-auth-firestore": "./bin/better-auth-firestore.js"
+  },
   "files": [
     "dist",
+    "bin",
     "README.md",
     "LICENSE",
     "firestore.indexes.json"

@@ -5,6 +5,7 @@ import {
 	createAdapterFactory,
 	type DBAdapterDebugLogOption,
 } from "better-auth/adapters";
+import { getAuthTables } from "better-auth/db";
 import type { Firestore, Transaction } from "firebase-admin/firestore";
 import { FieldPath, Timestamp } from "firebase-admin/firestore";
 import { initFirestore } from "./firestore.js";
@@ -803,6 +804,56 @@ export interface FirestoreAdapterOptions
 	debugLogs?: DBAdapterDebugLogOption;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Startup migration check
+// ─────────────────────────────────────────────────────────────────────────────
+// Better Auth 1.7 looks accounts up by `(issuer, accountId)`; documents
+// written by earlier versions have no `issuer`, so their users silently get
+// "invalid credentials" after an upgrade. Firestore has no migration runner
+// to refuse the upgrade, so the adapter does what Better Auth itself does
+// for misconfiguration: warn once at startup, naming the fix. Two aggregation
+// reads (total vs. documents that have the field — Firestore excludes
+// documents missing a field from `orderBy` on it), run in the background
+// when the adapter is first bound to a `betterAuth()` instance.
+
+const issuerChecksStarted = new Set<string>();
+
+async function warnIfAccountsLackIssuer(
+	db: Firestore,
+	options: Parameters<typeof getAuthTables>[0],
+	namingStrategy: NamingStrategy,
+	collections: ReturnType<typeof resolveCollectionNames>,
+	mapper: FieldMapper,
+	warn: (message: string) => void,
+): Promise<void> {
+	const account = getAuthTables(options).account;
+	const issuerField = account?.fields.issuer?.fieldName;
+	// Better Auth < 1.7 has no issuer field — nothing to migrate.
+	if (!account || !issuerField) return;
+
+	const col = getCollectionRef(db, account.modelName, collections);
+	if (issuerChecksStarted.has(col.path)) return;
+	issuerChecksStarted.add(col.path);
+
+	const [total, stamped] = await Promise.all([
+		col.count().get(),
+		col.orderBy(mapper.toDb(issuerField)).count().get(),
+	]);
+	const missing = total.data().count - stamped.data().count;
+	if (missing <= 0) return;
+
+	const flags = [
+		col.id !== "accounts" ? ` --collection ${col.id}` : "",
+		namingStrategy === "snake_case" ? " --naming-strategy snake_case" : "",
+	].join("");
+	warn(
+		`[better-auth-firestore] ${missing} of ${total.data().count} documents in "${col.path}" have no "${issuerField}" field. ` +
+			"Better Auth 1.7 looks accounts up by (issuer, accountId), so those users cannot sign in until it is backfilled. " +
+			`Run: npx better-auth-firestore backfill-account-issuers${flags} --apply ` +
+			"(dry run without --apply). See README → Upgrading to Better Auth 1.7. Set migrationChecks: false to silence this check.",
+	);
+}
+
 export const firestoreAdapter: (
 	config?: FirestoreAdapterOptions | Firestore,
 ) => ReturnType<typeof createAdapterFactory> = (
@@ -813,6 +864,7 @@ export const firestoreAdapter: (
 		namingStrategy = "default",
 		collections: collectionsOverride = {},
 		debugLogs = false,
+		migrationChecks = true,
 	} = ((config as FirestoreAdapterOptions) && (config as any).collection
 		? {}
 		: (config as FirestoreAdapterOptions)) || {};
@@ -2361,8 +2413,21 @@ export const firestoreAdapter: (
 	// a factory with the same schema, id generation and model/field-name
 	// mapping as the plain adapter — the approach `@better-auth/mongo-adapter`
 	// takes, minus its shared mutable options.
-	return (options) =>
-		createAdapterFactory({
+	return (options) => {
+		if (migrationChecks) {
+			// Best effort and off the request path: a failed check (no
+			// permission for aggregations, offline emulator) must not affect
+			// authentication.
+			warnIfAccountsLackIssuer(
+				db,
+				options,
+				namingStrategy,
+				collections,
+				mapper,
+				(message) => console.warn(message),
+			).catch(() => undefined);
+		}
+		return createAdapterFactory({
 			...customAdapter,
 			config: {
 				...factoryConfig,
@@ -2393,4 +2458,5 @@ export const firestoreAdapter: (
 				},
 			},
 		})(options);
+	};
 };

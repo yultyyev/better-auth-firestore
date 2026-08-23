@@ -61,8 +61,13 @@ firestoreAdapter({
     verificationTokens?: string;
   };
   debugLogs?: boolean | DBAdapterDebugLogOption;
+  migrationChecks?: boolean;      // default true: warn once at startup if account docs lack `issuer` (Better Auth 1.7)
 });
 ```
+
+## CLI
+
+`npx better-auth-firestore backfill-account-issuers [--apply]` (`src/cli.ts`, `bin/better-auth-firestore.js`) is the one-command form of the Better Auth 1.7 account-issuer migration: dry run by default, `--apply` to write, `--collection` / `--naming-strategy` / `--issuer provider=url` / `--service-account` / `--json`; exit 1 on collisions or unresolved documents, 2 on usage errors. Credentials resolve like `initFirestore()` (service account file, `FIREBASE_*` env trio, ADC, emulator). It is the answer to "existing users can't sign in after upgrading to 1.7" — the startup check logs the exact command.
 
 ## Firestore Index (Optional)
 
@@ -73,7 +78,7 @@ Older versions required composite indexes — on the verification collection (`i
 ## Better Auth 1.7 Compatibility
 
 - 1.7 made `incrementOne` and `consumeOne` **required** on custom adapters and removed the `transaction(findMany + updateMany)` fallback. Both are implemented natively in `src/firebase-adapter.ts` — on the plain adapter *and* on the transaction adapter (`runWithTransaction` hands whatever our `transaction()` passes to its callback to plugins as the current adapter). Adding them is additive: 1.6 prefers a native implementation when present, so one codebase supports 1.6 and 1.7. CI runs the suite against both.
-- 1.7 identifies accounts by `(issuer, accountId)`; `account.issuer` is required. Firestore has no `auth migrate`, so `backfillAccountIssuers` (`src/backfill-account-issuers.ts`) stamps existing documents. Rules mirror `@better-auth/core`: `credential` → `local:credential` (with `accountId = userId`), `siwe` → `local:siwe`, other providers → `local:oauth:<encodeURIComponent(providerId)>`; real issuers via `issuers` / `resolveIssuer`.
+- 1.7 identifies accounts by `(issuer, accountId)`; `account.issuer` is required. Firestore has no `auth migrate`, so `backfillAccountIssuers` (`src/backfill-account-issuers.ts`, exposed as the CLI above) stamps existing documents. Rules mirror `@better-auth/core`: `credential` → `local:credential` (with `accountId = userId`), `siwe` → `local:siwe`, other providers → `local:oauth:<encodeURIComponent(providerId)>`; real issuers via `issuers` / `resolveIssuer`. `warnIfAccountsLackIssuer` in `src/firebase-adapter.ts` runs once per process when the adapter is bound to a `betterAuth()` instance whose schema has `issuer` (two `count()` aggregations; `orderBy(issuer)` excludes documents missing the field) and warns with the exact command.
 - `SecondaryStorage.getAndDelete` / `increment` are required in 1.7; the test helper `tests/helpers/firestore-secondary-storage.ts` implements both (and encodes keys — better-auth keys contain `/`, which Firestore reads as a path separator).
 - The transaction adapter is factory-wrapped, like the official MongoDB adapter: `transaction()` builds a per-transaction `CustomAdapter` (`createTransactionAdapter`) and passes it through `createAdapterFactory({ ...config, transaction: false })(options)` before handing it to the callback, so it receives the same mapped `modelName`/`fieldName`s, cleaned `where` clauses and transformed data (generated ids, `createdAt`/`updatedAt`, `emailVerified` defaults) as the plain adapter. better-auth calls the current adapter with schema model keys and raw data, so an unwrapped adapter silently targets the wrong collection as soon as a `modelName` is customised — `tests/transaction-model-name.test.ts` pins this. A custom `modelName` names the Firestore collection directly and takes precedence over the `collections` option, inside and outside transactions.
 

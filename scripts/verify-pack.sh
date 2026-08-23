@@ -173,6 +173,18 @@ write_tsconfig bundler preserve
 echo "==> resolving the entry point"
 (cd "$CONSUMER" && node ./esm-smoke.mjs && node ./cjs-smoke.cjs)
 
+echo "==> running the CLI from the installed package"
+BIN="$CONSUMER/node_modules/.bin/better-auth-firestore"
+if [[ ! -x "$BIN" ]]; then
+	echo "error: the package did not install a better-auth-firestore bin" >&2
+	exit 1
+fi
+if ! (cd "$CONSUMER" && "$BIN" --help | grep -q "backfill-account-issuers"); then
+	echo "error: better-auth-firestore --help did not list backfill-account-issuers" >&2
+	exit 1
+fi
+echo "    ok  better-auth-firestore --help"
+
 echo "==> type-checking a consumer"
 for resolution in nodenext bundler; do
 	(cd "$CONSUMER" && node "$TSC" -p "tsconfig.$resolution.json")
