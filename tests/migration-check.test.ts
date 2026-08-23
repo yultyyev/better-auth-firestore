@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { Firestore } from "firebase-admin/firestore";
+import type { MockInstance } from "vitest";
 import { firestoreAdapter } from "../src";
 import { initFirestore } from "../src/firestore";
 
@@ -32,7 +33,7 @@ async function clearCollection(db: Firestore, name: string) {
 
 describe("startup account-issuer migration check", () => {
 	const db = initFirestore({ name: "test-migration-check", projectId: "test" });
-	let warn: ReturnType<typeof vi.spyOn>;
+	let warn: MockInstance<typeof console.warn>;
 
 	beforeEach(() => {
 		warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -43,8 +44,8 @@ describe("startup account-issuer migration check", () => {
 
 	const warnings = () =>
 		warn.mock.calls
-			.map((c) => String(c[0]))
-			.filter((m) => m.includes("[better-auth-firestore]"));
+			.map((call: unknown[]) => String(call[0]))
+			.filter((message: string) => message.includes("[better-auth-firestore]"));
 
 	it("warns once, naming the exact command, when account documents lack an issuer", async () => {
 		const collections = collectionsFor("mc1");
