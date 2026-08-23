@@ -217,13 +217,15 @@ Every version above is exercised in CI (typecheck + build). TypeScript is an
 
 | Runtime | Supported | Notes |
 |---|---|---|
-| Node 18+ | ✅ | Recommended |
+| Node 22+ | ✅ | Required (active LTS and newer). `import` works throughout; `require()` needs 22.12+ — see below. |
 | Next.js on Vercel (Node.js runtime) | ✅ | Default serverless runtime — fully supported |
 | Cloud Functions / Cloud Run | ✅ | Provide `FIREBASE_*` creds |
 | Vercel Edge Runtime (`runtime = 'edge'`) | ❌ | Firebase Admin SDK requires Node.js |
 | Cloudflare Workers | ❌ | Firebase Admin SDK requires Node.js |
 
 > **Vercel works.** The ❌ above applies only if you explicitly set `export const runtime = 'edge'` on a route. The default Node.js serverless runtime on Vercel is fully supported.
+
+> **ESM and CommonJS.** The package ships a single ESM build. `import` works on any supported Node. `require("better-auth-firestore")` relies on Node's `require(esm)`, unflagged since **22.12** — so CommonJS callers (Firebase Cloud Functions and friends) need 22.12 or newer, which every current 22.x LTS release satisfies. TypeScript projects that emit CommonJS need `"module": "nodenext"` — the older `"node16"` setting predates `require(esm)` and reports [TS1479](https://typescript.tv/errors/#ts1479).
 
 ## Collections & Data Shape
 
