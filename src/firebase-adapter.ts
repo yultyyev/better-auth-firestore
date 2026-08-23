@@ -475,16 +475,10 @@ class TxBuffer {
 }
 
 /**
- * Evaluates a where clause against an in-memory app-side doc. AND-within-
- * group, OR-between-groups (a new group starts at every `connector: "OR"`).
- * Unknown operators fall back to equality — see TxBuffer header for the
- * supported set.
+ * Splits a where clause into its OR groups: AND-within-group, OR-between-
+ * groups (a new group starts at every `connector: "OR"`).
  */
-function matchesWhere(
-	appData: Record<string, any>,
-	where: WhereCondition[] | undefined,
-): boolean {
-	if (!where || where.length === 0) return true;
+function splitOrGroups(where: WhereCondition[]): WhereCondition[][] {
 	const groups: WhereCondition[][] = [];
 	let current: WhereCondition[] = [];
 	for (const cond of where) {
@@ -496,9 +490,58 @@ function matchesWhere(
 		}
 	}
 	if (current.length > 0) groups.push(current);
-	return groups.some((group) =>
+	return groups;
+}
+
+/**
+ * Evaluates a where clause against an in-memory app-side doc. AND-within-
+ * group, OR-between-groups (a new group starts at every `connector: "OR"`).
+ * Unknown operators fall back to equality — see TxBuffer header for the
+ * supported set.
+ */
+function matchesWhere(
+	appData: Record<string, any>,
+	where: WhereCondition[] | undefined,
+): boolean {
+	if (!where || where.length === 0) return true;
+	return splitOrGroups(where).some((group) =>
 		group.every((cond) => matchesCondition(appData, cond)),
 	);
+}
+
+/**
+ * Normalizes a value for in-memory comparison: Dates compare by instant
+ * (Firestore hands Timestamps back as fresh Date objects, so `===` would
+ * never match), everything else as-is.
+ */
+function comparable(value: unknown): unknown {
+	return value instanceof Date ? value.getTime() : value;
+}
+
+/**
+ * Relational comparison with SQL/Firestore semantics: a missing or null
+ * field never satisfies a range guard. Plain JS would coerce `null` to 0
+ * and let e.g. `lockedUntil <= now` pass for a row that was never locked.
+ */
+function compareRelational(
+	left: unknown,
+	right: unknown,
+	op: "gt" | "gte" | "lt" | "lte",
+): boolean {
+	if (left === null || left === undefined) return false;
+	if (right === null || right === undefined) return false;
+	const a = comparable(left) as any;
+	const b = comparable(right) as any;
+	switch (op) {
+		case "gt":
+			return a > b;
+		case "gte":
+			return a >= b;
+		case "lt":
+			return a < b;
+		case "lte":
+			return a <= b;
+	}
 }
 
 function matchesCondition(
@@ -510,27 +553,24 @@ function matchesCondition(
 	switch (op) {
 		case "eq":
 		case "==":
-			return val === cond.value;
+			return comparable(val) === comparable(cond.value);
 		case "ne":
 		case "!=":
-			return val !== cond.value;
+			return comparable(val) !== comparable(cond.value);
 		case "in":
 			return Array.isArray(cond.value)
-				? cond.value.includes(val)
-				: val === cond.value;
+				? cond.value.map(comparable).includes(comparable(val))
+				: comparable(val) === comparable(cond.value);
 		case "notIn":
 		case "not_in":
 			return Array.isArray(cond.value)
-				? !cond.value.includes(val)
-				: val !== cond.value;
+				? !cond.value.map(comparable).includes(comparable(val))
+				: comparable(val) !== comparable(cond.value);
 		case "gt":
-			return val > cond.value;
 		case "gte":
-			return val >= cond.value;
 		case "lt":
-			return val < cond.value;
 		case "lte":
-			return val <= cond.value;
+			return compareRelational(val, cond.value, op);
 		case "contains":
 		case "array-contains":
 			if (Array.isArray(val)) return val.includes(cond.value);
@@ -614,6 +654,146 @@ function dbDataToAppData(
 	return result;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Guarded single-row mutation (`incrementOne`)
+// ─────────────────────────────────────────────────────────────────────────────
+// better-auth uses `incrementOne` as its compare-and-swap primitive: the
+// `where` clause is both selector and guard (`count < max`, `lockedUntil <=
+// now`, `status == "pending"`, …) and the row is mutated only while the
+// guard still holds. Since 1.7 the adapter must provide it natively — the
+// factory's `transaction(findMany + updateMany)` fallback is gone.
+//
+// Firestore has no conditional update, so we run a transaction: read the
+// candidate rows, evaluate the guard in memory, write once. Firestore
+// serializes the transaction against concurrent writes to the rows it read,
+// which gives the same "at most one row, only while the guard holds"
+// semantics as `UPDATE … WHERE … RETURNING *`.
+//
+// Only equality filters (`eq` / `in`) are sent to Firestore; every other
+// operator is evaluated in memory. Equality-only queries are served by
+// Firestore's automatic single-field indexes, whereas mixing an equality on
+// one field with a range on another (exactly the limiter's `key == … AND
+// lastRequest > … AND count < …`) would demand a composite index from every
+// consumer. Every better-auth caller selects by `id` or a unique key, so the
+// equality prefix narrows the read to a single document in practice; a
+// where clause with no equality condition at all falls back to scanning
+// the collection.
+
+const isEqualityOperator = (operator: string | undefined): boolean =>
+	operator === undefined ||
+	operator === "eq" ||
+	operator === "==" ||
+	operator === "in";
+
+/**
+ * Reads every existing document that could satisfy `where`, inside
+ * `transaction`, using only equality filters (see the section header).
+ * Callers still have to apply the full `where` with `matchesWhere`. Results
+ * are deduplicated across OR groups and oversized `in` chunks.
+ */
+async function collectGuardCandidates(
+	transaction: Transaction,
+	col: FirebaseFirestore.CollectionReference,
+	where: WhereCondition[] | undefined,
+	mapper: FieldMapper,
+): Promise<FirebaseFirestore.DocumentSnapshot[]> {
+	const byPath = new Map<string, FirebaseFirestore.DocumentSnapshot>();
+	const add = (snap: FirebaseFirestore.DocumentSnapshot) => {
+		if (snap.exists && !byPath.has(snap.ref.path))
+			byPath.set(snap.ref.path, snap);
+	};
+
+	const groups = where && where.length > 0 ? splitOrGroups(where) : [[]];
+	for (const group of groups) {
+		// Document IDs are metadata, not fields: an `id` equality resolves to
+		// direct reads and the rest of the group is checked in memory.
+		const idCond = group.find(
+			(w) => w.field === "id" && isEqualityOperator(w.operator),
+		);
+		if (idCond) {
+			const ids = (
+				Array.isArray(idCond.value) ? idCond.value : [idCond.value]
+			).filter((id): id is string => typeof id === "string" && id !== "");
+			if (ids.length === 0) continue;
+			const snaps = await transaction.getAll(...ids.map((id) => col.doc(id)));
+			for (const snap of snaps) add(snap);
+			continue;
+		}
+
+		const serverSide = group
+			.filter((w) => w.field !== "id" && isEqualityOperator(w.operator))
+			.map((w): WhereCondition => ({ ...w, connector: "AND" }));
+		for (const chunk of getChunkedWhereClauses(
+			serverSide.length > 0 ? serverSide : undefined,
+		)) {
+			const snap = await transaction.get(applyWhereClause(col, chunk, mapper));
+			for (const doc of snap.docs) add(doc);
+		}
+	}
+	return Array.from(byPath.values());
+}
+
+interface IncrementPatch {
+	/** Absolute assignments, db-side keys — ready for `transaction.update`. */
+	setDocData: Record<string, any>;
+	/** Absolute assignments, app-side keys — merged into the returned row. */
+	setAppData: Record<string, any>;
+	increments: { appField: string; dbField: string; delta: number }[];
+}
+
+function buildIncrementPatch(
+	model: string,
+	increment: Record<string, number> | undefined,
+	set: Record<string, unknown> | undefined,
+	mapper: FieldMapper,
+): IncrementPatch {
+	const normalizedSet = normalizeWriteData(
+		model,
+		(set ?? {}) as Record<string, any>,
+	);
+	const { docData: setDocData } = buildFirestoreWriteData(
+		normalizedSet,
+		mapper,
+	);
+	const setAppData: Record<string, any> = {};
+	for (const [k, v] of Object.entries(normalizedSet)) {
+		if (v === undefined || k === "id") continue;
+		setAppData[mapper.fromDb(mapper.toDb(k))] = v;
+	}
+	const increments = Object.entries(increment ?? {}).map(([field, delta]) => {
+		const dbField = mapper.toDb(field);
+		return { appField: mapper.fromDb(dbField), dbField, delta };
+	});
+	return { setDocData, setAppData, increments };
+}
+
+/**
+ * Computes the post-mutation state of one row. A counter that is missing or
+ * non-numeric starts from 0 — matching the behaviour of the 1.6 fallback,
+ * which the two-factor lockout relies on for rows created before the
+ * counter field existed.
+ */
+function applyIncrementPatch(
+	current: Record<string, any>,
+	patch: IncrementPatch,
+): {
+	/** Changed fields only, db-side keys. */
+	docData: Record<string, any>;
+	/** Changed fields only, app-side keys. */
+	appPatch: Record<string, any>;
+	/** Full row after the mutation, app-side keys. */
+	appData: Record<string, any>;
+} {
+	const docData: Record<string, any> = { ...patch.setDocData };
+	const appPatch: Record<string, any> = { ...patch.setAppData };
+	for (const { appField, dbField, delta } of patch.increments) {
+		const base = typeof current[appField] === "number" ? current[appField] : 0;
+		appPatch[appField] = base + delta;
+		docData[dbField] = base + delta;
+	}
+	return { docData, appPatch, appData: { ...current, ...appPatch } };
+}
+
 export interface FirestoreAdapterOptions
 	extends Omit<FirestoreAdapterConfig, "firestore"> {
 	firestore?: Firestore;
@@ -653,6 +833,67 @@ export const firestoreAdapter: (
 			transaction: async (run) => {
 				return await db.runTransaction(async (transaction: Transaction) => {
 					const buffer = new TxBuffer();
+
+					// Subset of the non-tx `findMany` path: no OR-split queries or
+					// direct `id` lookups. better-auth's tx callbacks (e.g.
+					// consumeVerificationValue) only issue simple equality filters.
+					const txFindMany = async ({
+						model,
+						where,
+						limit,
+						offset,
+						sortBy,
+					}: any) => {
+						const col = getCollectionRef(db, model, collections);
+						const byPath = new Map<string, Record<string, any>>();
+
+						// 1. Real reads (chunked for oversized `in` clauses), overlaying
+						//    any staged update and dropping any staged delete.
+						for (const whereClause of getChunkedWhereClauses(where)) {
+							const q = applyWhereClause(col, whereClause, mapper);
+							const snap = await transaction.get(q);
+							for (const doc of snap.docs) {
+								if (buffer.isDeleted(doc.ref.path)) continue;
+								const staged = buffer.getByPath(doc.ref.path);
+								if (staged && staged.op !== "delete") {
+									byPath.set(doc.ref.path, { ...staged.appData });
+									continue;
+								}
+								const data = doc.data();
+								if (!data) continue;
+								byPath.set(doc.ref.path, {
+									id: doc.id,
+									...dbDataToAppData(data, mapper),
+								});
+							}
+						}
+
+						// 2. Overlay: staged creates in this transaction that match `where`.
+						for (const entry of buffer.values()) {
+							if (entry.op !== "create" || entry.model !== model) continue;
+							if (
+								!byPath.has(entry.ref.path) &&
+								matchesWhere(entry.appData, where)
+							) {
+								byPath.set(entry.ref.path, { ...entry.appData });
+							}
+						}
+
+						let results = Array.from(byPath.values());
+						if (sortBy?.field) {
+							results.sort((a, b) => {
+								const aVal = a[sortBy.field];
+								const bVal = b[sortBy.field];
+								const dir = sortBy.direction === "desc" ? -1 : 1;
+								if (aVal < bVal) return -1 * dir;
+								if (aVal > bVal) return 1 * dir;
+								return 0;
+							});
+						}
+						if (offset) results = results.slice(offset);
+						if (limit !== undefined) results = results.slice(0, limit);
+						return results;
+					};
 
 					const txAdapter = {
 						create: async ({ model, data }: any) => {
@@ -738,74 +979,28 @@ export const firestoreAdapter: (
 							if (!data) return null;
 							return { id: doc.id, ...dbDataToAppData(data, mapper) };
 						},
-						// Subset of the non-tx `findMany` path: no OR-split queries or
-						// direct `id` lookups. better-auth's tx callbacks (e.g.
-						// consumeVerificationValue) only issue simple equality filters.
-						findMany: async ({ model, where, limit, offset, sortBy }: any) => {
-							const col = getCollectionRef(db, model, collections);
-							const byPath = new Map<string, Record<string, any>>();
-
-							// 1. Real reads (chunked for oversized `in` clauses), overlaying
-							//    any staged update and dropping any staged delete.
-							for (const whereClause of getChunkedWhereClauses(where)) {
-								const q = applyWhereClause(col, whereClause, mapper);
-								const snap = await transaction.get(q);
-								for (const doc of snap.docs) {
-									if (buffer.isDeleted(doc.ref.path)) continue;
-									const staged = buffer.getByPath(doc.ref.path);
-									if (staged && staged.op !== "delete") {
-										byPath.set(doc.ref.path, { ...staged.appData });
-										continue;
-									}
-									const data = doc.data();
-									if (!data) continue;
-									byPath.set(doc.ref.path, {
-										id: doc.id,
-										...dbDataToAppData(data, mapper),
-									});
-								}
-							}
-
-							// 2. Overlay: staged creates in this transaction that match `where`.
-							for (const entry of buffer.values()) {
-								if (entry.op !== "create" || entry.model !== model) continue;
-								if (
-									!byPath.has(entry.ref.path) &&
-									matchesWhere(entry.appData, where)
-								) {
-									byPath.set(entry.ref.path, { ...entry.appData });
-								}
-							}
-
-							let results = Array.from(byPath.values());
-							if (sortBy?.field) {
-								results.sort((a, b) => {
-									const aVal = a[sortBy.field];
-									const bVal = b[sortBy.field];
-									const dir = sortBy.direction === "desc" ? -1 : 1;
-									if (aVal < bVal) return -1 * dir;
-									if (aVal > bVal) return 1 * dir;
-									return 0;
-								});
-							}
-							if (offset) results = results.slice(offset);
-							if (limit !== undefined) results = results.slice(0, limit);
-							return results;
+						findMany: txFindMany,
+						// `runWithTransaction` hands this object to plugins as the
+						// current adapter, so it has to expose the full `Adapter`
+						// surface — the organization plugin counts members inside
+						// its transactions.
+						count: async ({ model, where }: any) => {
+							return (await txFindMany({ model, where })).length;
 						},
 						// Mirrors the non-tx `updateMany`, but stages every write in the
 						// buffer so reads later in the same transaction observe them and
 						// the flush emits one write per ref.
 						//
-						// better-auth reaches this through `incrementOne`: adapters
-						// without a native implementation fall back to
-						// `transaction(findMany + updateMany)`, which is how the
-						// database-backed rate limiter counts a request. Without this
-						// method that fallback threw `updateMany is not a function` and
-						// every rate-limited route 500'd.
+						// Before better-auth 1.7, adapters without a native
+						// `incrementOne` fell back to `transaction(findMany +
+						// updateMany)` — the path the database-backed rate limiter took
+						// to count a request. Without this method that fallback threw
+						// `updateMany is not a function` and every rate-limited route
+						// 500'd. 1.7 removed the fallback (see `incrementOne` below),
+						// but `updateManyWithHooks` still reaches this inside
+						// transactions.
 						//
-						// Returns the number of affected docs — the fallback re-applies
-						// the caller's `where` here as a compare-and-swap guard and
-						// treats a zero count as "someone else won the race".
+						// Returns the number of affected docs.
 						updateMany: async ({ model, where, update }: any) => {
 							const col = getCollectionRef(db, model, collections);
 							const normalizedUpdate = normalizeWriteData(model, update);
@@ -929,6 +1124,78 @@ export const firestoreAdapter: (
 								count++;
 							}
 							return count;
+						},
+						// Single-doc variant of `deleteMany`: `deleteWithHooks` and the
+						// organization plugin call `delete` on the current adapter
+						// inside transactions.
+						delete: async ({ model, where }: any) => {
+							const col = getCollectionRef(db, model, collections);
+							const stagedCreate = buffer.findCreateMatching(model, where);
+							if (stagedCreate) {
+								buffer.stageDelete(model, stagedCreate.ref);
+								return;
+							}
+							const doc = await lookupTxDoc(transaction, col, where, mapper);
+							if (!doc || buffer.isDeleted(doc.ref.path)) return;
+							buffer.stageDelete(model, doc.ref);
+						},
+						// Transactional `incrementOne` (see the section header above
+						// `collectGuardCandidates`). The enclosing Firestore transaction
+						// already provides atomicity, so this only has to find the first
+						// row that satisfies the guard — staged creates first, then real
+						// reads overlaid with staged updates — and fold the patch into
+						// the buffer so the flush emits one write per ref.
+						incrementOne: async ({ model, where, increment, set }: any) => {
+							const col = getCollectionRef(db, model, collections);
+							const patch = buildIncrementPatch(model, increment, set, mapper);
+
+							const stagedCreate = buffer.findCreateMatching(model, where);
+							if (stagedCreate) {
+								const { docData, appPatch } = applyIncrementPatch(
+									stagedCreate.appData,
+									patch,
+								);
+								Object.assign(stagedCreate.docData, docData);
+								Object.assign(stagedCreate.appData, appPatch);
+								return { ...stagedCreate.appData };
+							}
+
+							const candidates = await collectGuardCandidates(
+								transaction,
+								col,
+								where,
+								mapper,
+							);
+							for (const snap of candidates) {
+								if (buffer.isDeleted(snap.ref.path)) continue;
+								const staged = buffer.getByPath(snap.ref.path);
+								const current =
+									staged && staged.op !== "delete"
+										? staged.appData
+										: {
+												id: snap.id,
+												...dbDataToAppData(snap.data() ?? {}, mapper),
+											};
+								if (!matchesWhere(current, where)) continue;
+								const { docData, appPatch } = applyIncrementPatch(
+									current,
+									patch,
+								);
+								if (staged && staged.op !== "delete") {
+									Object.assign(staged.docData, docData);
+									Object.assign(staged.appData, appPatch);
+									return { ...staged.appData };
+								}
+								const entry = buffer.stageUpdate(
+									model,
+									snap.ref,
+									docData,
+									appPatch,
+									current,
+								);
+								return { ...entry.appData };
+							}
+							return null;
 						},
 						consumeOne: async ({ model, where }: any) => {
 							const col = getCollectionRef(db, model, collections);
@@ -1272,6 +1539,62 @@ export const firestoreAdapter: (
 						};
 						transaction.delete(doc.ref);
 						return appData as T;
+					});
+				},
+				// Native guarded counter mutation — required by better-auth 1.7,
+				// preferred over the transaction fallback by 1.6. See the section
+				// header above `collectGuardCandidates` for the design.
+				incrementOne: async <T>({
+					model,
+					where,
+					increment,
+					set,
+				}: {
+					model: string;
+					where: WhereCondition[];
+					increment: Record<string, number>;
+					set?: Record<string, unknown> | undefined;
+				}) => {
+					const col = getCollectionRef(db, model, collections);
+					const patch = buildIncrementPatch(model, increment, set, mapper);
+					if (debugLogs) {
+						console.log(`[Firestore Adapter] INCREMENTONE ${model}:`, {
+							where,
+							increment,
+							set,
+						});
+					}
+					return await db.runTransaction(async (transaction) => {
+						const candidates = await collectGuardCandidates(
+							transaction,
+							col,
+							where,
+							mapper,
+						);
+						for (const snap of candidates) {
+							const current = {
+								id: snap.id,
+								...dbDataToAppData(snap.data() ?? {}, mapper),
+							};
+							if (!matchesWhere(current, where)) continue;
+							const { docData, appData } = applyIncrementPatch(current, patch);
+							if (Object.keys(docData).length > 0) {
+								transaction.update(snap.ref, docData);
+							}
+							if (debugLogs) {
+								console.log(
+									`[Firestore Adapter] INCREMENTONE ${model} - returning:`,
+									appData,
+								);
+							}
+							return appData as T;
+						}
+						if (debugLogs) {
+							console.log(
+								`[Firestore Adapter] INCREMENTONE ${model} - guard matched no document`,
+							);
+						}
+						return null;
 					});
 				},
 				findOne: async ({ model, where, select }) => {

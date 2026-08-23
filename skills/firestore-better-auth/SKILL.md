@@ -1,12 +1,14 @@
 ---
 name: firestore-better-auth
-version: 1.0.0
+version: 1.1.0
 description: >-
   Use Firestore as the database adapter for Better Auth (Firebase Admin SDK).
   Use when storing Better Auth users, sessions, accounts, and verification
   tokens in Firestore, migrating from Auth.js/NextAuth Firebase adapter to
-  Better Auth, setting up Better Auth with a Firebase/Firestore backend, or
-  troubleshooting Firestore index errors and FIREBASE_PRIVATE_KEY issues.
+  Better Auth, setting up Better Auth with a Firebase/Firestore backend,
+  upgrading a Firestore-backed app to Better Auth 1.7 (account issuer
+  backfill), or troubleshooting Firestore index errors, incrementOne errors,
+  and FIREBASE_PRIVATE_KEY issues.
 ---
 
 # Firestore Adapter for Better Auth
@@ -91,11 +93,36 @@ export const auth = betterAuth({
 
 ## Firestore composite index — not required (v1.1+)
 
-No composite index is required. The adapter never combines a `where` filter with a Firestore `orderBy`: it applies the filter server-side and sorts the results in memory. Verification-token lookups (`identifier ==` ordered by `createdAt desc`) work with Firestore's automatic single-field indexes alone.
+No composite index is required. The adapter never combines a `where` filter with a Firestore `orderBy`: it applies the filter server-side and sorts the results in memory. Verification-token lookups (`identifier ==` ordered by `createdAt desc`) work with Firestore's automatic single-field indexes alone. As of v1.3 the same holds for `rateLimit.storage: "database"`: the native `incrementOne` sends only equality filters to Firestore and checks the limiter's range guards in memory inside a transaction.
 
 **If sign-in fails with `9 FAILED_PRECONDITION: The query requires an index`** (Better Auth may surface this as `Failed to parse state`), you are on an older version. **Upgrade to v1.1 or later** — do not create the index. Any composite index created for a previous version can be removed afterward.
 
 **Optional tooling** (only for advanced setups that query the verification collection directly, outside the adapter): `generateIndexSetupUrl(projectId, databaseId?, collectionName?)` and `getIndexConfig(collectionName?)`, plus the bundled `firestore.indexes.json`. These default to the `verificationTokens` collection (use `verification_tokens` for the snake_case strategy).
+
+---
+
+## Upgrading to Better Auth 1.7
+
+Better Auth 1.7 needs adapter **v1.3+** (it made `incrementOne` a required adapter method; older adapters throw `Adapter "firestore" must implement incrementOne for atomic guarded counter updates` on rate limiting, organization invitations, device authorization, and two-factor). v1.3 also works with Better Auth 1.6, so upgrade the adapter first.
+
+1.7 identifies accounts by `(issuer, accountId)` and stores `issuer` on every account. Existing Firestore documents don't have it, and Firestore has no `npx auth migrate` — **existing users cannot sign in after upgrading until the field is backfilled**:
+
+```ts
+import { backfillAccountIssuers } from "better-auth-firestore";
+
+// Dry run first — review `byIssuer`, `unresolved`, and `collisions`.
+console.log(await backfillAccountIssuers({ firestore, dryRun: true }));
+
+// Then, with authentication writes paused:
+await backfillAccountIssuers({
+  firestore,
+  // collection / namingStrategy: match the adapter config
+  // issuers: { okta: "https://acme.okta.com" } — only for providers with a real issuer;
+  // built-in social providers get `local:oauth:<providerId>` automatically.
+});
+```
+
+Order: adapter → v1.3, run the backfill, then `better-auth` → 1.7. Full details: https://better-auth.com/docs/guides/1-7-upgrade-guide
 
 ---
 
@@ -186,6 +213,9 @@ No credentials or service account needed when using the emulator.
 ## Common mistakes
 
 - **`The query requires an index` on verification tokens** — You're on a version older than v1.1. Upgrade `better-auth-firestore`; the adapter now sorts filtered queries in memory and needs no composite index.
+- **`The query requires an index` on `rateLimit`** — You're on a version older than v1.3. Upgrade; the native `incrementOne` needs no composite index. Do not create the index.
+- **`Adapter "firestore" must implement incrementOne`** — Better Auth 1.7 with an adapter older than v1.3. Upgrade `better-auth-firestore`.
+- **Existing users can't sign in after moving to Better Auth 1.7** — The `account.issuer` backfill was not run. Run `backfillAccountIssuers` (see above).
 - **FIREBASE_PRIVATE_KEY with literal `\n`** — Always call `.replace(/\\n/g, "\n")` on the key before passing to `cert()`.
 - **Using at edge runtime** — Firebase Admin SDK does not run on Vercel Edge or Cloudflare Workers. Use Node.js runtimes only.
 - **Deprecated scoped package** — Use `better-auth-firestore` (unscoped). The `@yultyyev/better-auth-firestore` package is deprecated.
