@@ -10,9 +10,9 @@ With **Squash and merge** (recommended), GitHub uses the **PR title** as the squ
 |-----------------|--------|
 | `feat: …` | **minor** bump |
 | `fix: …` / `fix(scope): …` | **patch** bump |
-| `chore(deps): …` / `chore(security): …` | **patch** bump (custom rule) |
+| `chore(security): …` | **patch** bump (custom rule) |
 | `feat!: …` or commit footer `BREAKING CHANGE:` | **major** bump |
-| `docs:` / `ci:` / `test:` / `chore:` / `refactor:` | **no release** |
+| `docs:` / `ci:` / `test:` / `chore:` / `chore(deps):` / `refactor:` | **no release** |
 
 > With **Merge commit** or **Rebase and merge** the PR title is ignored — individual branch commit messages are used instead.
 
