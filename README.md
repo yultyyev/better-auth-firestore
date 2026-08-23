@@ -202,6 +202,17 @@ firestoreAdapter({
 
 > **For older projects:** if your app still uses older Better Auth patterns (`createAuth` + `adapter`), this adapter remains compatible, but new projects should use `betterAuth` + `database`.
 
+### TypeScript versions
+
+| TypeScript | Status | Notes |
+|---|---|---|
+| `7.x` | ✅ Supported | Native compiler. Produces byte-identical declarations to 5.x/6.x. |
+| `6.x` | ✅ Supported | Drop-in — no config changes required. |
+| `5.x` | ✅ Supported | Minimum supported version is `5.0`; used for the published build. |
+
+Every version above is exercised in CI (typecheck + build). TypeScript is an
+**optional** peer dependency, so JavaScript-only projects never install it.
+
 ### Runtime compatibility
 
 | Runtime | Supported | Notes |

@@ -105,6 +105,7 @@ Helper (optional, for advanced/direct-query setups only): `generateIndexSetupUrl
 ```bash
 pnpm install       # Install dependencies
 pnpm build         # Build the project (outputs to dist/)
+pnpm typecheck     # Typecheck src + tests without emitting
 pnpm test          # Run tests (requires FIRESTORE_EMULATOR_HOST)
 pnpm lint          # Check for linting issues
 pnpm lint:fix      # Fix auto-fixable linting issues
