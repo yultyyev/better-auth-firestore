@@ -44,6 +44,7 @@ import {
   firestoreAdapter,         // Main adapter factory
   initFirestore,            // Helper to initialize Firebase Admin + Firestore
   generateIndexSetupUrl,    // Generate Firebase Console URL for index creation
+  backfillAccountIssuers,   // One-off data migration for Better Auth 1.7 (account.issuer)
 } from "better-auth-firestore";
 ```
 
@@ -65,9 +66,16 @@ firestoreAdapter({
 
 ## Firestore Index (Optional)
 
-No composite index is required. The adapter never issues a filter + `orderBy` query: `findMany` calls that combine a `where` filter with a `sortBy` apply the filter server-side and sort the results in memory. Verification-token lookups (`identifier ==` ordered by `createdAt desc`) therefore work with only Firestore's automatic single-field indexes.
+No composite index is required. The adapter never issues a filter + `orderBy` query: `findMany` calls that combine a `where` filter with a `sortBy` apply the filter server-side and sort the results in memory. Verification-token lookups (`identifier ==` ordered by `createdAt desc`) therefore work with only Firestore's automatic single-field indexes. The native `incrementOne` (v1.3+) follows the same rule: only equality filters reach Firestore, range guards are evaluated in memory inside a transaction, so `rateLimit.storage: "database"` needs no composite index either.
 
-Older versions (< v1.1) required a composite index on the verification collection (`identifier` ASC, `createdAt` DESC, `__name__` DESC). If a user reports `9 FAILED_PRECONDITION: The query requires an index` (often surfaced by Better Auth as `Failed to parse state`), the fix is to upgrade — not to create the index.
+Older versions required composite indexes — on the verification collection (`identifier` ASC, `createdAt` DESC, `__name__` DESC; < v1.1) and on `rateLimit` (< v1.3). If a user reports `9 FAILED_PRECONDITION: The query requires an index` (often surfaced by Better Auth as `Failed to parse state`), the fix is to upgrade — not to create the index.
+
+## Better Auth 1.7 Compatibility
+
+- 1.7 made `incrementOne` and `consumeOne` **required** on custom adapters and removed the `transaction(findMany + updateMany)` fallback. Both are implemented natively in `src/firebase-adapter.ts` — on the plain adapter *and* on the transaction adapter (`runWithTransaction` hands that raw object to plugins as the current adapter). Adding them is additive: 1.6 prefers a native implementation when present, so one codebase supports 1.6 and 1.7. CI runs the suite against both.
+- 1.7 identifies accounts by `(issuer, accountId)`; `account.issuer` is required. Firestore has no `auth migrate`, so `backfillAccountIssuers` (`src/backfill-account-issuers.ts`) stamps existing documents. Rules mirror `@better-auth/core`: `credential` → `local:credential` (with `accountId = userId`), `siwe` → `local:siwe`, other providers → `local:oauth:<encodeURIComponent(providerId)>`; real issuers via `issuers` / `resolveIssuer`.
+- `SecondaryStorage.getAndDelete` / `increment` are required in 1.7; the test helper `tests/helpers/firestore-secondary-storage.ts` implements both (and encodes keys — better-auth keys contain `/`, which Firestore reads as a path separator).
+- Known limitation: the transaction adapter receives *unmapped* model and field names (better-auth's default `modelName` equals the model key, so built-in and plugin models work; custom `modelName`s inside transactions do not). Wrapping it with `createAdapterFactory` like the official MongoDB adapter is the fix.
 
 Helper (optional, for advanced/direct-query setups only): `generateIndexSetupUrl(projectId, databaseId?, collectionName?)` and `getIndexConfig(collectionName?)`. Both default `collectionName` to `verificationTokens` (use `verification_tokens` for snake_case).
 
@@ -76,7 +84,7 @@ Helper (optional, for advanced/direct-query setups only): `generateIndexSetupUrl
 - **Edge Runtime not supported** — Firebase Admin SDK requires Node.js. If a route sets `export const runtime = 'edge'`, the Admin SDK will not load. Standard Vercel deployments (Node.js serverless runtime) work fine.
 - **FIREBASE_PRIVATE_KEY newlines** — Environment variables often store the key with literal `\n` strings. Users must call `.replace(/\\n/g, "\n")`.
 - **Scoped package deprecated** — `@yultyyev/better-auth-firestore` → `better-auth-firestore`. The API is identical; only the import path changes.
-- **Emulator support** — Set `FIRESTORE_EMULATOR_HOST=localhost:8080`; the Admin SDK automatically routes requests there. No credentials needed.
+- **Emulator support** — Set `FIRESTORE_EMULATOR_HOST=localhost:8080`; the Admin SDK automatically routes requests there. No credentials needed. The emulator does **not** enforce composite indexes, so index requirements only surface against real Firestore.
 
 ## Sister Package
 
@@ -112,6 +120,8 @@ docker run -d --rm -p 8080:8080 google/cloud-sdk:emulators \
 
 FIRESTORE_EMULATOR_HOST=localhost:8080 pnpm vitest run
 ```
+
+CI runs the suite twice: against the lockfile's Better Auth (1.7) and against the latest 1.6 (`pnpm add -D better-auth@1.6`). Keep both green — the adapter promises to work with either.
 
 ## Commit Messages
 

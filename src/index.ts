@@ -1,3 +1,11 @@
+export {
+	type BackfillAccountIssuersOptions,
+	type BackfillAccountIssuersResult,
+	type BackfillAccountRecord,
+	backfillAccountIssuers,
+	localAccountIssuer,
+	oauthAccountIssuer,
+} from "./backfill-account-issuers.js";
 export { firestoreAdapter } from "./firebase-adapter.js";
 export { initFirestore } from "./firestore.js";
 export { generateIndexSetupUrl, getIndexConfig } from "./setup.js";
