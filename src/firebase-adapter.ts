@@ -1,4 +1,7 @@
 import {
+	type AdapterFactoryConfig,
+	type AdapterFactoryOptions,
+	type CustomAdapter,
 	createAdapterFactory,
 	type DBAdapterDebugLogOption,
 } from "better-auth/adapters";
@@ -821,413 +824,404 @@ export const firestoreAdapter: (
 	);
 	const mapper = mapFieldsFactory(preferSnakeCase);
 
-	return createAdapterFactory({
-		config: {
-			adapterId: "firestore",
-			adapterName: "Firestore Adapter",
-			supportsJSON: true,
-			supportsDates: true,
-			supportsBooleans: true,
-			supportsNumericIds: false,
-			debugLogs,
-			transaction: async (run) => {
-				return await db.runTransaction(async (transaction: Transaction) => {
-					const buffer = new TxBuffer();
+	// ───────────────────────────────────────────────────────────────────────
+	// Transaction adapter
+	// ───────────────────────────────────────────────────────────────────────
+	// The `CustomAdapter` that serves one Firestore transaction. It receives
+	// exactly what the plain adapter receives — the factory has already mapped
+	// `model` to its configured `modelName`, cleaned the `where` clause and
+	// transformed the data — and stages every write in `buffer`, which the
+	// caller flushes onto `transaction` once the user callback resolves.
+	const createTransactionAdapter = (
+		transaction: Transaction,
+		buffer: TxBuffer,
+	): CustomAdapter => {
+		// Subset of the non-tx `findMany` path: no OR-split queries or
+		// direct `id` lookups. better-auth's tx callbacks (e.g.
+		// consumeVerificationValue) only issue simple equality filters.
+		const txFindMany = async ({
+			model,
+			where,
+			limit,
+			offset,
+			sortBy,
+		}: any): Promise<any[]> => {
+			const col = getCollectionRef(db, model, collections);
+			const byPath = new Map<string, Record<string, any>>();
 
-					// Subset of the non-tx `findMany` path: no OR-split queries or
-					// direct `id` lookups. better-auth's tx callbacks (e.g.
-					// consumeVerificationValue) only issue simple equality filters.
-					const txFindMany = async ({
-						model,
-						where,
-						limit,
-						offset,
-						sortBy,
-					}: any) => {
-						const col = getCollectionRef(db, model, collections);
-						const byPath = new Map<string, Record<string, any>>();
+			// 1. Real reads (chunked for oversized `in` clauses), overlaying
+			//    any staged update and dropping any staged delete.
+			for (const whereClause of getChunkedWhereClauses(where)) {
+				const q = applyWhereClause(col, whereClause, mapper);
+				const snap = await transaction.get(q);
+				for (const doc of snap.docs) {
+					if (buffer.isDeleted(doc.ref.path)) continue;
+					const staged = buffer.getByPath(doc.ref.path);
+					if (staged && staged.op !== "delete") {
+						byPath.set(doc.ref.path, { ...staged.appData });
+						continue;
+					}
+					const data = doc.data();
+					if (!data) continue;
+					byPath.set(doc.ref.path, {
+						id: doc.id,
+						...dbDataToAppData(data, mapper),
+					});
+				}
+			}
 
-						// 1. Real reads (chunked for oversized `in` clauses), overlaying
-						//    any staged update and dropping any staged delete.
-						for (const whereClause of getChunkedWhereClauses(where)) {
-							const q = applyWhereClause(col, whereClause, mapper);
-							const snap = await transaction.get(q);
-							for (const doc of snap.docs) {
-								if (buffer.isDeleted(doc.ref.path)) continue;
-								const staged = buffer.getByPath(doc.ref.path);
-								if (staged && staged.op !== "delete") {
-									byPath.set(doc.ref.path, { ...staged.appData });
-									continue;
-								}
-								const data = doc.data();
-								if (!data) continue;
-								byPath.set(doc.ref.path, {
-									id: doc.id,
-									...dbDataToAppData(data, mapper),
-								});
-							}
-						}
+			// 2. Overlay: staged creates in this transaction that match `where`.
+			for (const entry of buffer.values()) {
+				if (entry.op !== "create" || entry.model !== model) continue;
+				if (!byPath.has(entry.ref.path) && matchesWhere(entry.appData, where)) {
+					byPath.set(entry.ref.path, { ...entry.appData });
+				}
+			}
 
-						// 2. Overlay: staged creates in this transaction that match `where`.
-						for (const entry of buffer.values()) {
-							if (entry.op !== "create" || entry.model !== model) continue;
-							if (
-								!byPath.has(entry.ref.path) &&
-								matchesWhere(entry.appData, where)
-							) {
-								byPath.set(entry.ref.path, { ...entry.appData });
-							}
-						}
+			let results = Array.from(byPath.values());
+			if (sortBy?.field) {
+				results.sort((a, b) => {
+					const aVal = a[sortBy.field];
+					const bVal = b[sortBy.field];
+					const dir = sortBy.direction === "desc" ? -1 : 1;
+					if (aVal < bVal) return -1 * dir;
+					if (aVal > bVal) return 1 * dir;
+					return 0;
+				});
+			}
+			if (offset) results = results.slice(offset);
+			if (limit !== undefined) results = results.slice(0, limit);
+			return results;
+		};
 
-						let results = Array.from(byPath.values());
-						if (sortBy?.field) {
-							results.sort((a, b) => {
-								const aVal = a[sortBy.field];
-								const bVal = b[sortBy.field];
-								const dir = sortBy.direction === "desc" ? -1 : 1;
-								if (aVal < bVal) return -1 * dir;
-								if (aVal > bVal) return 1 * dir;
-								return 0;
-							});
-						}
-						if (offset) results = results.slice(offset);
-						if (limit !== undefined) results = results.slice(0, limit);
-						return results;
+		return {
+			create: async ({ model, data }: any): Promise<any> => {
+				const col = getCollectionRef(db, model, collections);
+				const normalizedData = normalizeWriteData(model, data);
+				const { docData, idOverride } = buildFirestoreWriteData(
+					normalizedData,
+					mapper,
+				);
+				const ref = idOverride ? col.doc(idOverride) : col.doc();
+				const entry = buffer.stageCreate(model, ref, docData, normalizedData);
+				return { ...entry.appData };
+			},
+			update: async ({ model, where, update }: any): Promise<any> => {
+				const col = getCollectionRef(db, model, collections);
+				const normalizedUpdate = normalizeWriteData(model, update);
+				const { docData: updateData } = buildFirestoreWriteData(
+					normalizedUpdate,
+					mapper,
+				);
+
+				// 1. Overlay: target may already be staged as a create in
+				//    this same transaction. Mutate it in place so the flush
+				//    emits one combined `set`.
+				const stagedCreate = buffer.findCreateMatching(model, where);
+				if (stagedCreate) {
+					Object.assign(stagedCreate.docData, updateData);
+					Object.assign(stagedCreate.appData, normalizedUpdate);
+					return { ...stagedCreate.appData };
+				}
+
+				// 2. Otherwise read from Firestore (still safe — no writes
+				//    have been flushed yet) to locate the target doc.
+				const doc = await lookupTxDoc(transaction, col, where, mapper);
+				if (!doc) return null;
+
+				// 3. Same ref may already have an update staged; merge.
+				//    (A staged delete is skipped — falls through to stage a
+				//    fresh update below, mirroring "not currently buffered".)
+				const existing = buffer.getByPath(doc.ref.path);
+				if (existing && existing.op !== "delete") {
+					Object.assign(existing.docData, updateData);
+					Object.assign(existing.appData, normalizedUpdate);
+					return { ...existing.appData };
+				}
+
+				// 4. Stage a fresh update.
+				const baseAppData = dbDataToAppData(doc.data() ?? {}, mapper);
+				const entry = buffer.stageUpdate(
+					model,
+					doc.ref,
+					updateData,
+					normalizedUpdate,
+					baseAppData,
+				);
+				return { ...entry.appData };
+			},
+			findOne: async ({ model, where }: any): Promise<any> => {
+				const col = getCollectionRef(db, model, collections);
+
+				// 1. Overlay: return any matching staged create directly.
+				const stagedCreate = buffer.findCreateMatching(model, where);
+				if (stagedCreate) return { ...stagedCreate.appData };
+
+				// 2. Real read.
+				const doc = await lookupTxDoc(transaction, col, where, mapper);
+				if (!doc) return null;
+
+				// 3. A pending delete makes this doc invisible.
+				if (buffer.isDeleted(doc.ref.path)) return null;
+
+				// 4. Layer any pending update on top of the snapshot.
+				const staged = buffer.getByPath(doc.ref.path);
+				if (staged && staged.op !== "delete") return { ...staged.appData };
+
+				const data = doc.data();
+				if (!data) return null;
+				return { id: doc.id, ...dbDataToAppData(data, mapper) };
+			},
+			findMany: txFindMany,
+			// `runWithTransaction` hands the factory-wrapped form of this
+			// object to plugins as the current adapter, so it has to expose
+			// the full `CustomAdapter` surface — the organization plugin
+			// counts members inside its transactions.
+			count: async ({ model, where }: any) => {
+				return (await txFindMany({ model, where })).length;
+			},
+			// Mirrors the non-tx `updateMany`, but stages every write in the
+			// buffer so reads later in the same transaction observe them and
+			// the flush emits one write per ref.
+			//
+			// Before better-auth 1.7, adapters without a native
+			// `incrementOne` fell back to `transaction(findMany +
+			// updateMany)` — the path the database-backed rate limiter took
+			// to count a request. Without this method that fallback threw
+			// `updateMany is not a function` and every rate-limited route
+			// 500'd. 1.7 removed the fallback (see `incrementOne` below),
+			// but `updateManyWithHooks` still reaches this inside
+			// transactions.
+			//
+			// Returns the number of affected docs.
+			updateMany: async ({ model, where, update }: any) => {
+				const col = getCollectionRef(db, model, collections);
+				const normalizedUpdate = normalizeWriteData(model, update);
+				const { docData: updateData } = buildFirestoreWriteData(
+					normalizedUpdate,
+					mapper,
+				);
+				let count = 0;
+				const seenPaths = new Set<string>();
+
+				/** Merge into an existing staged write, or stage a fresh one. */
+				const applyTo = (
+					ref: FirebaseFirestore.DocumentReference,
+					baseAppData: Record<string, any>,
+				) => {
+					const existing = buffer.getByPath(ref.path);
+					if (existing && existing.op !== "delete") {
+						Object.assign(existing.docData, updateData);
+						Object.assign(existing.appData, normalizedUpdate);
+					} else {
+						buffer.stageUpdate(
+							model,
+							ref,
+							updateData,
+							normalizedUpdate,
+							baseAppData,
+						);
+					}
+					count++;
+				};
+
+				// `id` can't go through a Firestore query — it's document
+				// metadata, not a field. better-auth's `incrementOne` fallback
+				// appends exactly such a condition to its compare-and-swap
+				// guard, so without this branch every increment matched zero
+				// docs and the rate limiter denied every request.
+				const { id: idFilter, rest } = splitIdEqCondition(where);
+				if (idFilter) {
+					const ref = col.doc(idFilter);
+					if (buffer.isDeleted(ref.path)) return 0;
+					const staged = buffer.getByPath(ref.path);
+					if (staged && staged.op !== "delete") {
+						if (matchesWhere(staged.appData, rest)) applyTo(ref, {});
+						return count;
+					}
+					const snap = await transaction.get(ref);
+					if (!snap.exists) return 0;
+					const appData = {
+						id: snap.id,
+						...dbDataToAppData(snap.data() ?? {}, mapper),
 					};
+					if (matchesWhere(appData, rest)) applyTo(ref, appData);
+					return count;
+				}
 
-					const txAdapter = {
-						create: async ({ model, data }: any) => {
-							const col = getCollectionRef(db, model, collections);
-							const normalizedData = normalizeWriteData(model, data);
-							const { docData, idOverride } = buildFirestoreWriteData(
-								normalizedData,
-								mapper,
-							);
-							const ref = idOverride ? col.doc(idOverride) : col.doc();
-							const entry = buffer.stageCreate(
-								model,
-								ref,
-								docData,
-								normalizedData,
-							);
-							return { ...entry.appData };
-						},
-						update: async ({ model, where, update }: any) => {
-							const col = getCollectionRef(db, model, collections);
-							const normalizedUpdate = normalizeWriteData(model, update);
-							const { docData: updateData } = buildFirestoreWriteData(
-								normalizedUpdate,
-								mapper,
-							);
+				// 1. Real reads (chunked for oversized `in` clauses). A staged
+				//    delete hides the doc; an existing staged write merges in
+				//    place, mirroring step 3 of the single-doc `update`.
+				for (const whereClause of getChunkedWhereClauses(where)) {
+					const q = applyWhereClause(col, whereClause, mapper);
+					const snap = await transaction.get(q);
+					for (const doc of snap.docs) {
+						if (seenPaths.has(doc.ref.path) || buffer.isDeleted(doc.ref.path))
+							continue;
+						seenPaths.add(doc.ref.path);
+						applyTo(doc.ref, dbDataToAppData(doc.data() ?? {}, mapper));
+					}
+				}
 
-							// 1. Overlay: target may already be staged as a create in
-							//    this same transaction. Mutate it in place so the flush
-							//    emits one combined `set`.
-							const stagedCreate = buffer.findCreateMatching(model, where);
-							if (stagedCreate) {
-								Object.assign(stagedCreate.docData, updateData);
-								Object.assign(stagedCreate.appData, normalizedUpdate);
-								return { ...stagedCreate.appData };
-							}
+				// 2. Staged creates are invisible to Firestore queries until
+				//    flush, so fold them in by hand. Mutating in place keeps
+				//    the entry a `create`, so the flush still emits one `set`.
+				for (const entry of buffer.values()) {
+					if (entry.op !== "create" || entry.model !== model) continue;
+					if (seenPaths.has(entry.ref.path) || buffer.isDeleted(entry.ref.path))
+						continue;
+					if (!matchesWhere(entry.appData, where)) continue;
+					seenPaths.add(entry.ref.path);
+					Object.assign(entry.docData, updateData);
+					Object.assign(entry.appData, normalizedUpdate);
+					count++;
+				}
 
-							// 2. Otherwise read from Firestore (still safe — no writes
-							//    have been flushed yet) to locate the target doc.
-							const doc = await lookupTxDoc(transaction, col, where, mapper);
-							if (!doc) return null;
+				return count;
+			},
+			deleteMany: async ({ model, where }: any) => {
+				const col = getCollectionRef(db, model, collections);
+				let count = 0;
+				const seenPaths = new Set<string>();
+				for (const whereClause of getChunkedWhereClauses(where)) {
+					const q = applyWhereClause(col, whereClause, mapper);
+					const snap = await transaction.get(q);
+					for (const doc of snap.docs) {
+						if (seenPaths.has(doc.ref.path) || buffer.isDeleted(doc.ref.path))
+							continue;
+						seenPaths.add(doc.ref.path);
+						buffer.stageDelete(model, doc.ref);
+						count++;
+					}
+				}
+				// Staged creates are invisible to Firestore queries until flush.
+				for (const entry of buffer.values()) {
+					if (entry.op !== "create" || entry.model !== model) continue;
+					if (seenPaths.has(entry.ref.path) || buffer.isDeleted(entry.ref.path))
+						continue;
+					if (!matchesWhere(entry.appData, where)) continue;
+					seenPaths.add(entry.ref.path);
+					buffer.stageDelete(model, entry.ref);
+					count++;
+				}
+				return count;
+			},
+			// Single-doc variant of `deleteMany`: `deleteWithHooks` and the
+			// organization plugin call `delete` on the current adapter
+			// inside transactions.
+			delete: async ({ model, where }: any) => {
+				const col = getCollectionRef(db, model, collections);
+				const stagedCreate = buffer.findCreateMatching(model, where);
+				if (stagedCreate) {
+					buffer.stageDelete(model, stagedCreate.ref);
+					return;
+				}
+				const doc = await lookupTxDoc(transaction, col, where, mapper);
+				if (!doc || buffer.isDeleted(doc.ref.path)) return;
+				buffer.stageDelete(model, doc.ref);
+			},
+			// Transactional `incrementOne` (see the section header above
+			// `collectGuardCandidates`). The enclosing Firestore transaction
+			// already provides atomicity, so this only has to find the first
+			// row that satisfies the guard — staged creates first, then real
+			// reads overlaid with staged updates — and fold the patch into
+			// the buffer so the flush emits one write per ref.
+			incrementOne: async ({
+				model,
+				where,
+				increment,
+				set,
+			}: any): Promise<any> => {
+				const col = getCollectionRef(db, model, collections);
+				const patch = buildIncrementPatch(model, increment, set, mapper);
 
-							// 3. Same ref may already have an update staged; merge.
-							//    (A staged delete is skipped — falls through to stage a
-							//    fresh update below, mirroring "not currently buffered".)
-							const existing = buffer.getByPath(doc.ref.path);
-							if (existing && existing.op !== "delete") {
-								Object.assign(existing.docData, updateData);
-								Object.assign(existing.appData, normalizedUpdate);
-								return { ...existing.appData };
-							}
+				const stagedCreate = buffer.findCreateMatching(model, where);
+				if (stagedCreate) {
+					const { docData, appPatch } = applyIncrementPatch(
+						stagedCreate.appData,
+						patch,
+					);
+					Object.assign(stagedCreate.docData, docData);
+					Object.assign(stagedCreate.appData, appPatch);
+					return { ...stagedCreate.appData };
+				}
 
-							// 4. Stage a fresh update.
-							const baseAppData = dbDataToAppData(doc.data() ?? {}, mapper);
-							const entry = buffer.stageUpdate(
-								model,
-								doc.ref,
-								updateData,
-								normalizedUpdate,
-								baseAppData,
-							);
-							return { ...entry.appData };
-						},
-						findOne: async ({ model, where }: any) => {
-							const col = getCollectionRef(db, model, collections);
-
-							// 1. Overlay: return any matching staged create directly.
-							const stagedCreate = buffer.findCreateMatching(model, where);
-							if (stagedCreate) return { ...stagedCreate.appData };
-
-							// 2. Real read.
-							const doc = await lookupTxDoc(transaction, col, where, mapper);
-							if (!doc) return null;
-
-							// 3. A pending delete makes this doc invisible.
-							if (buffer.isDeleted(doc.ref.path)) return null;
-
-							// 4. Layer any pending update on top of the snapshot.
-							const staged = buffer.getByPath(doc.ref.path);
-							if (staged && staged.op !== "delete")
-								return { ...staged.appData };
-
-							const data = doc.data();
-							if (!data) return null;
-							return { id: doc.id, ...dbDataToAppData(data, mapper) };
-						},
-						findMany: txFindMany,
-						// `runWithTransaction` hands this object to plugins as the
-						// current adapter, so it has to expose the full `Adapter`
-						// surface — the organization plugin counts members inside
-						// its transactions.
-						count: async ({ model, where }: any) => {
-							return (await txFindMany({ model, where })).length;
-						},
-						// Mirrors the non-tx `updateMany`, but stages every write in the
-						// buffer so reads later in the same transaction observe them and
-						// the flush emits one write per ref.
-						//
-						// Before better-auth 1.7, adapters without a native
-						// `incrementOne` fell back to `transaction(findMany +
-						// updateMany)` — the path the database-backed rate limiter took
-						// to count a request. Without this method that fallback threw
-						// `updateMany is not a function` and every rate-limited route
-						// 500'd. 1.7 removed the fallback (see `incrementOne` below),
-						// but `updateManyWithHooks` still reaches this inside
-						// transactions.
-						//
-						// Returns the number of affected docs.
-						updateMany: async ({ model, where, update }: any) => {
-							const col = getCollectionRef(db, model, collections);
-							const normalizedUpdate = normalizeWriteData(model, update);
-							const { docData: updateData } = buildFirestoreWriteData(
-								normalizedUpdate,
-								mapper,
-							);
-							let count = 0;
-							const seenPaths = new Set<string>();
-
-							/** Merge into an existing staged write, or stage a fresh one. */
-							const applyTo = (
-								ref: FirebaseFirestore.DocumentReference,
-								baseAppData: Record<string, any>,
-							) => {
-								const existing = buffer.getByPath(ref.path);
-								if (existing && existing.op !== "delete") {
-									Object.assign(existing.docData, updateData);
-									Object.assign(existing.appData, normalizedUpdate);
-								} else {
-									buffer.stageUpdate(
-										model,
-										ref,
-										updateData,
-										normalizedUpdate,
-										baseAppData,
-									);
-								}
-								count++;
-							};
-
-							// `id` can't go through a Firestore query — it's document
-							// metadata, not a field. better-auth's `incrementOne` fallback
-							// appends exactly such a condition to its compare-and-swap
-							// guard, so without this branch every increment matched zero
-							// docs and the rate limiter denied every request.
-							const { id: idFilter, rest } = splitIdEqCondition(where);
-							if (idFilter) {
-								const ref = col.doc(idFilter);
-								if (buffer.isDeleted(ref.path)) return 0;
-								const staged = buffer.getByPath(ref.path);
-								if (staged && staged.op !== "delete") {
-									if (matchesWhere(staged.appData, rest)) applyTo(ref, {});
-									return count;
-								}
-								const snap = await transaction.get(ref);
-								if (!snap.exists) return 0;
-								const appData = {
+				const candidates = await collectGuardCandidates(
+					transaction,
+					col,
+					where,
+					mapper,
+				);
+				for (const snap of candidates) {
+					if (buffer.isDeleted(snap.ref.path)) continue;
+					const staged = buffer.getByPath(snap.ref.path);
+					const current =
+						staged && staged.op !== "delete"
+							? staged.appData
+							: {
 									id: snap.id,
 									...dbDataToAppData(snap.data() ?? {}, mapper),
 								};
-								if (matchesWhere(appData, rest)) applyTo(ref, appData);
-								return count;
-							}
-
-							// 1. Real reads (chunked for oversized `in` clauses). A staged
-							//    delete hides the doc; an existing staged write merges in
-							//    place, mirroring step 3 of the single-doc `update`.
-							for (const whereClause of getChunkedWhereClauses(where)) {
-								const q = applyWhereClause(col, whereClause, mapper);
-								const snap = await transaction.get(q);
-								for (const doc of snap.docs) {
-									if (
-										seenPaths.has(doc.ref.path) ||
-										buffer.isDeleted(doc.ref.path)
-									)
-										continue;
-									seenPaths.add(doc.ref.path);
-									applyTo(doc.ref, dbDataToAppData(doc.data() ?? {}, mapper));
-								}
-							}
-
-							// 2. Staged creates are invisible to Firestore queries until
-							//    flush, so fold them in by hand. Mutating in place keeps
-							//    the entry a `create`, so the flush still emits one `set`.
-							for (const entry of buffer.values()) {
-								if (entry.op !== "create" || entry.model !== model) continue;
-								if (
-									seenPaths.has(entry.ref.path) ||
-									buffer.isDeleted(entry.ref.path)
-								)
-									continue;
-								if (!matchesWhere(entry.appData, where)) continue;
-								seenPaths.add(entry.ref.path);
-								Object.assign(entry.docData, updateData);
-								Object.assign(entry.appData, normalizedUpdate);
-								count++;
-							}
-
-							return count;
-						},
-						deleteMany: async ({ model, where }: any) => {
-							const col = getCollectionRef(db, model, collections);
-							let count = 0;
-							const seenPaths = new Set<string>();
-							for (const whereClause of getChunkedWhereClauses(where)) {
-								const q = applyWhereClause(col, whereClause, mapper);
-								const snap = await transaction.get(q);
-								for (const doc of snap.docs) {
-									if (
-										seenPaths.has(doc.ref.path) ||
-										buffer.isDeleted(doc.ref.path)
-									)
-										continue;
-									seenPaths.add(doc.ref.path);
-									buffer.stageDelete(model, doc.ref);
-									count++;
-								}
-							}
-							// Staged creates are invisible to Firestore queries until flush.
-							for (const entry of buffer.values()) {
-								if (entry.op !== "create" || entry.model !== model) continue;
-								if (
-									seenPaths.has(entry.ref.path) ||
-									buffer.isDeleted(entry.ref.path)
-								)
-									continue;
-								if (!matchesWhere(entry.appData, where)) continue;
-								seenPaths.add(entry.ref.path);
-								buffer.stageDelete(model, entry.ref);
-								count++;
-							}
-							return count;
-						},
-						// Single-doc variant of `deleteMany`: `deleteWithHooks` and the
-						// organization plugin call `delete` on the current adapter
-						// inside transactions.
-						delete: async ({ model, where }: any) => {
-							const col = getCollectionRef(db, model, collections);
-							const stagedCreate = buffer.findCreateMatching(model, where);
-							if (stagedCreate) {
-								buffer.stageDelete(model, stagedCreate.ref);
-								return;
-							}
-							const doc = await lookupTxDoc(transaction, col, where, mapper);
-							if (!doc || buffer.isDeleted(doc.ref.path)) return;
-							buffer.stageDelete(model, doc.ref);
-						},
-						// Transactional `incrementOne` (see the section header above
-						// `collectGuardCandidates`). The enclosing Firestore transaction
-						// already provides atomicity, so this only has to find the first
-						// row that satisfies the guard — staged creates first, then real
-						// reads overlaid with staged updates — and fold the patch into
-						// the buffer so the flush emits one write per ref.
-						incrementOne: async ({ model, where, increment, set }: any) => {
-							const col = getCollectionRef(db, model, collections);
-							const patch = buildIncrementPatch(model, increment, set, mapper);
-
-							const stagedCreate = buffer.findCreateMatching(model, where);
-							if (stagedCreate) {
-								const { docData, appPatch } = applyIncrementPatch(
-									stagedCreate.appData,
-									patch,
-								);
-								Object.assign(stagedCreate.docData, docData);
-								Object.assign(stagedCreate.appData, appPatch);
-								return { ...stagedCreate.appData };
-							}
-
-							const candidates = await collectGuardCandidates(
-								transaction,
-								col,
-								where,
-								mapper,
-							);
-							for (const snap of candidates) {
-								if (buffer.isDeleted(snap.ref.path)) continue;
-								const staged = buffer.getByPath(snap.ref.path);
-								const current =
-									staged && staged.op !== "delete"
-										? staged.appData
-										: {
-												id: snap.id,
-												...dbDataToAppData(snap.data() ?? {}, mapper),
-											};
-								if (!matchesWhere(current, where)) continue;
-								const { docData, appPatch } = applyIncrementPatch(
-									current,
-									patch,
-								);
-								if (staged && staged.op !== "delete") {
-									Object.assign(staged.docData, docData);
-									Object.assign(staged.appData, appPatch);
-									return { ...staged.appData };
-								}
-								const entry = buffer.stageUpdate(
-									model,
-									snap.ref,
-									docData,
-									appPatch,
-									current,
-								);
-								return { ...entry.appData };
-							}
-							return null;
-						},
-						consumeOne: async ({ model, where }: any) => {
-							const col = getCollectionRef(db, model, collections);
-							const stagedCreate = buffer.findCreateMatching(model, where);
-							if (stagedCreate) {
-								buffer.stageDelete(model, stagedCreate.ref);
-								return { ...stagedCreate.appData };
-							}
-							const doc = await lookupTxDoc(transaction, col, where, mapper);
-							if (!doc || buffer.isDeleted(doc.ref.path)) return null;
-							const staged = buffer.getByPath(doc.ref.path);
-							const appData =
-								staged && staged.op !== "delete"
-									? { ...staged.appData }
-									: (() => {
-											const data = doc.data();
-											return data
-												? { id: doc.id, ...dbDataToAppData(data, mapper) }
-												: null;
-										})();
-							if (!appData) return null;
-							buffer.stageDelete(model, doc.ref);
-							return appData;
-						},
-					};
-
-					const result = await run(txAdapter as any);
-					buffer.flush(transaction);
-					return result;
-				});
+					if (!matchesWhere(current, where)) continue;
+					const { docData, appPatch } = applyIncrementPatch(current, patch);
+					if (staged && staged.op !== "delete") {
+						Object.assign(staged.docData, docData);
+						Object.assign(staged.appData, appPatch);
+						return { ...staged.appData };
+					}
+					const entry = buffer.stageUpdate(
+						model,
+						snap.ref,
+						docData,
+						appPatch,
+						current,
+					);
+					return { ...entry.appData };
+				}
+				return null;
 			},
-		},
+			consumeOne: async ({ model, where }: any): Promise<any> => {
+				const col = getCollectionRef(db, model, collections);
+				const stagedCreate = buffer.findCreateMatching(model, where);
+				if (stagedCreate) {
+					buffer.stageDelete(model, stagedCreate.ref);
+					return { ...stagedCreate.appData };
+				}
+				const doc = await lookupTxDoc(transaction, col, where, mapper);
+				if (!doc || buffer.isDeleted(doc.ref.path)) return null;
+				const staged = buffer.getByPath(doc.ref.path);
+				const appData =
+					staged && staged.op !== "delete"
+						? { ...staged.appData }
+						: (() => {
+								const data = doc.data();
+								return data
+									? { id: doc.id, ...dbDataToAppData(data, mapper) }
+									: null;
+							})();
+				if (!appData) return null;
+				buffer.stageDelete(model, doc.ref);
+				return appData;
+			},
+		};
+	};
+
+	// Shared by the plain adapter and by the factory wrapped around each
+	// transaction adapter (see `transaction` below).
+	const factoryConfig = {
+		adapterId: "firestore",
+		adapterName: "Firestore Adapter",
+		supportsJSON: true,
+		supportsDates: true,
+		supportsBooleans: true,
+		supportsNumericIds: false,
+		debugLogs,
+	} satisfies Omit<AdapterFactoryConfig, "transaction">;
+
+	// The plain (non-transactional) custom adapter — the `adapter` half of
+	// the factory options. `config` is assembled per instance below so that
+	// `transaction` can close over that instance's better-auth options.
+	const customAdapter = {
 		adapter: () => {
 			return {
 				create: async ({ model, data }) => {
@@ -2360,5 +2354,43 @@ export const firestoreAdapter: (
 				},
 			};
 		},
-	});
+	} satisfies Pick<AdapterFactoryOptions, "adapter">;
+
+	// One factory per `betterAuth()` instance, bound to that instance's
+	// options: `transaction` needs them to wrap its per-transaction adapter in
+	// a factory with the same schema, id generation and model/field-name
+	// mapping as the plain adapter — the approach `@better-auth/mongo-adapter`
+	// takes, minus its shared mutable options.
+	return (options) =>
+		createAdapterFactory({
+			...customAdapter,
+			config: {
+				...factoryConfig,
+				// `runWithTransaction` stores whatever `run` receives as the
+				// current adapter for the rest of the callback, and better-auth
+				// internals and plugins then call it exactly like the top-level
+				// adapter: with schema model keys (`user`), unmapped field names
+				// and untransformed data, relying on the factory for
+				// `modelName`/`fieldName` mapping, id generation, defaults and
+				// date/JSON conversion. Handing `run` the raw custom adapter
+				// skipped all of that — harmless while every `modelName` equalled
+				// its model key, but silently targeting the wrong collection the
+				// moment one was customised. So each transaction gets its own
+				// factory-wrapped adapter, with `transaction: false` so nested
+				// `transaction()` calls run as-is on the same Firestore
+				// transaction.
+				transaction: async (run) => {
+					return await db.runTransaction(async (transaction: Transaction) => {
+						const buffer = new TxBuffer();
+						const txAdapter = createAdapterFactory({
+							config: { ...factoryConfig, transaction: false },
+							adapter: () => createTransactionAdapter(transaction, buffer),
+						})(options);
+						const result = await run(txAdapter);
+						buffer.flush(transaction);
+						return result;
+					});
+				},
+			},
+		})(options);
 };

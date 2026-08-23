@@ -564,7 +564,8 @@ describe("Transaction buffering (regression for #24)", () => {
 				model: "session",
 				data: {
 					userId: u.id,
-					expires: new Date("2030-01-01T00:00:00.000Z"),
+					token: "tx7-session-token",
+					expiresAt: new Date("2030-01-01T00:00:00.000Z"),
 				},
 			});
 		});
@@ -757,38 +758,59 @@ describe("Transaction buffering (regression for #24)", () => {
 	// through `.where("id", "==", ...)` matches nothing — updateMany returned 0,
 	// the CAS was read as "someone else won the race", and the limiter denied
 	// every single request while never incrementing the counter.
+	//
+	// The transaction adapter is factory-wrapped, so the guard has to use a
+	// field the `user` schema knows about: `createdAt` stands in for the
+	// limiter's numeric range check.
 	it("updateMany inside a transaction resolves an `id` condition as a doc ref, not a field", async () => {
 		const seedRef = db.collection(TX_COLLECTIONS.users).doc();
-		await seedRef.set({ email: "cas@example.com", name: "before", count: 1 });
+		await seedRef.set({
+			email: "cas@example.com",
+			name: "before",
+			createdAt: new Date("2030-01-01T00:00:00.000Z"),
+		});
 
 		const count = await adapter.transaction(async (tx: any) => {
 			return tx.updateMany({
 				model: "user",
 				where: [
 					{ field: "email", operator: "eq", value: "cas@example.com" },
-					{ field: "count", operator: "lt", value: 3 },
+					{
+						field: "createdAt",
+						operator: "lt",
+						value: new Date("2031-01-01T00:00:00.000Z"),
+					},
 					{ field: "id", operator: "eq", value: seedRef.id },
 				],
-				update: { name: "after", count: 2 },
+				update: { name: "after" },
 			});
 		});
 		expect(count).toBe(1);
 
 		const after = await seedRef.get();
 		expect(after.data()?.name).toBe("after");
-		expect(after.data()?.count).toBe(2);
+		// Untouched fields survive the update mask.
+		expect(after.data()?.email).toBe("cas@example.com");
 	});
 
 	it("updateMany with an `id` condition still honours the other conditions", async () => {
 		const seedRef = db.collection(TX_COLLECTIONS.users).doc();
-		await seedRef.set({ email: "cas2@example.com", name: "before", count: 9 });
+		await seedRef.set({
+			email: "cas2@example.com",
+			name: "before",
+			createdAt: new Date("2030-01-01T00:00:00.000Z"),
+		});
 
 		const count = await adapter.transaction(async (tx: any) => {
 			return tx.updateMany({
 				model: "user",
 				where: [
-					// Guard fails: count is 9, not < 3.
-					{ field: "count", operator: "lt", value: 3 },
+					// Guard fails: the row was created in 2030, not before 2020.
+					{
+						field: "createdAt",
+						operator: "lt",
+						value: new Date("2020-01-01T00:00:00.000Z"),
+					},
 					{ field: "id", operator: "eq", value: seedRef.id },
 				],
 				update: { name: "after" },
@@ -909,13 +931,13 @@ describe("Transaction buffering (regression for #24)", () => {
 		const newRef = db.collection(TX_COLLECTIONS.verificationTokens).doc();
 		await oldRef.set({
 			identifier,
-			token: "old-token",
+			value: "old-token",
 			expiresAt: new Date("2030-01-01T00:00:00.000Z"),
 			createdAt: new Date("2030-01-01T00:00:00.000Z"),
 		});
 		await newRef.set({
 			identifier,
-			token: "new-token",
+			value: "new-token",
 			expiresAt: new Date("2030-01-02T00:00:00.000Z"),
 			createdAt: new Date("2030-01-02T00:00:00.000Z"),
 		});
@@ -932,7 +954,7 @@ describe("Transaction buffering (regression for #24)", () => {
 					limit: 1,
 				})
 			)[0];
-			expect(latest?.token).toBe("new-token");
+			expect(latest?.value).toBe("new-token");
 			const row = await tx.consumeOne({
 				model: "verification",
 				where: [{ field: "id", operator: "eq", value: latest.id }],
@@ -941,7 +963,7 @@ describe("Transaction buffering (regression for #24)", () => {
 			return row;
 		});
 
-		expect(consumed?.token).toBe("new-token");
+		expect(consumed?.value).toBe("new-token");
 
 		const remaining = await db
 			.collection(TX_COLLECTIONS.verificationTokens)
