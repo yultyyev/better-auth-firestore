@@ -29,6 +29,7 @@
     "lint": "biome check --formatter-enabled=false",
     "lint:fix": "biome check --write",
     "lint:fix:unsafe": "biome check --write --unsafe",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepublishOnly": "pnpm run build"
   },
   "engines": {
@@ -56,7 +57,12 @@
   "peerDependencies": {
     "better-auth": "*",
     "firebase-admin": ">=13",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0 || ^6.0.0 || ^7.0.0"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.2",
