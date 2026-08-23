@@ -14,6 +14,16 @@
 - **Example:** See [`/examples/minimal`](./examples/minimal) for a complete Next.js App Router example
 - **AI skill:** [Cursor, Claude Code, Codex & 70+ agents](#ai-assistant-skill) — `npx skills add yultyyev/better-auth-firestore` • [llms.txt](./llms.txt)
 
+> [!IMPORTANT]
+> **Upgrading to Better Auth 1.7 with existing users?** 1.7 looks accounts up by a new `issuer` field that older documents don't have, so existing users can't sign in until it's backfilled. Before your first deploy on 1.7, run:
+>
+> ```bash
+> npx better-auth-firestore backfill-account-issuers          # dry run — prints a report
+> npx better-auth-firestore backfill-account-issuers --apply  # writes
+> ```
+>
+> The adapter warns on startup while any account document is missing it. Details: [Upgrading to Better Auth 1.7](#upgrading-to-better-auth-17).
+
 ---
 
 ## Related: Firebase Auth Plugin
