@@ -200,7 +200,7 @@ No credentials or service account needed when using the emulator.
 
 | Runtime | Supported |
 |---|---|
-| Node 18+ | ✅ |
+| Node 22+ | ✅ Required (LTS+). ESM build; `require()` needs Node 22.12+ |
 | Next.js on Vercel (Node.js runtime) | ✅ Recommended |
 | Cloud Functions / Cloud Run | ✅ |
 | Vercel Edge Runtime (`runtime = 'edge'`) | ❌ Admin SDK requires Node.js |
