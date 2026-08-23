@@ -170,6 +170,7 @@ firestoreAdapter({
 	namingStrategy?: "default" | "snake_case";
 	collections?: { users?: string; sessions?: string; accounts?: string; verificationTokens?: string };
 	debugLogs?: boolean | DBAdapterDebugLogOption;
+	migrationChecks?: boolean; // default true — see "Upgrading to Better Auth 1.7"
 });
 ```
 
@@ -298,30 +299,18 @@ Better Auth 1.7 changed how accounts are identified and what it requires from da
 
 **1. Adapter v1.3+ is required.** 1.7 made `incrementOne` a mandatory adapter method and removed the fallback earlier versions relied on. With adapter ≤ v1.2 on Better Auth 1.7, sign-in still works but every feature built on atomic counters throws `Adapter "firestore" must implement incrementOne` — database-backed rate limiting, organization invitations and team seats, device authorization, and two-factor lockout. v1.3 implements it natively and also works with 1.6, so upgrade the adapter first, independently of Better Auth.
 
-**2. Existing account documents need an `issuer`.** 1.7 identifies an account by the pair `(issuer, accountId)` and stores `issuer` on every new account. Documents written by earlier versions don't have it, so after upgrading, 1.7 can't find them — **existing users can no longer sign in** until the field is backfilled. SQL users get this from `npx auth migrate`; Firestore has no migration runner, so the adapter ships `backfillAccountIssuers`:
+**2. Existing account documents need an `issuer`.** 1.7 identifies an account by the pair `(issuer, accountId)` and stores `issuer` on every new account. Documents written by earlier versions don't have it, so after upgrading, 1.7 can't find them — **existing users can no longer sign in** until the field is backfilled. SQL users get this from `npx auth migrate`; Firestore has no migration runner, so the adapter ships the migration as one command. Run it with the same credentials your app uses (`GOOGLE_APPLICATION_CREDENTIALS`, the `FIREBASE_*` variables from [Environment Variables](#environment-variables), or `--service-account key.json`):
 
-```ts
-import { backfillAccountIssuers } from "better-auth-firestore";
-
-// 1. Review the report first.
-console.log(await backfillAccountIssuers({ firestore, dryRun: true }));
-
-// 2. Pause authentication writes, then run for real.
-const result = await backfillAccountIssuers({
-  firestore,
-  // collection: "accounts", namingStrategy: "snake_case" — match your adapter config
-  issuers: {
-    // Only providers that confirm a real issuer. Built-in social providers
-    // (google, github, apple, …) don't — they get `local:oauth:<providerId>`
-    // automatically, which is what 1.7 assigns them.
-    // okta: "https://acme.okta.com",   // generic OAuth with discovery / accountIssuer
-    // google: "https://accounts.google.com", // only if you use the One Tap plugin
-  },
-});
-if (result.collisions.length) throw new Error("Resolve duplicate accounts first");
+```bash
+npx better-auth-firestore backfill-account-issuers            # dry run: prints the report, writes nothing
+npx better-auth-firestore backfill-account-issuers --apply    # writes, with authentication writes paused
 ```
 
-The helper mirrors 1.7's own rules: `credential` → `local:credential` (and repairs `accountId` to equal `userId`), `siwe` → `local:siwe`, everything else → `local:oauth:<encodeURIComponent(providerId)>`, with `issuers` / `resolveIssuer` overrides for providers that publish a real issuer. It is idempotent (stamped documents are skipped), paginates, and reports `(issuer, accountId)` collisions — 1.7 treats that pair as unique, so resolve any before deploying.
+Add `--collection` / `--naming-strategy snake_case` if you customised the adapter, and `--issuer okta=https://acme.okta.com` for a provider that publishes a real issuer (generic OAuth with discovery, Google One Tap). Built-in social providers don't — they get `local:oauth:<providerId>`, exactly what 1.7 assigns them. `--help` lists everything.
+
+The command mirrors 1.7's own rules: `credential` → `local:credential` (and repairs `accountId` to equal `userId`), `siwe` → `local:siwe`, everything else → `local:oauth:<encodeURIComponent(providerId)>`. It is idempotent (stamped documents are skipped), paginates, and exits with status 1 when it finds `(issuer, accountId)` collisions or documents it cannot resolve — 1.7 treats that pair as unique, so resolve those by hand before deploying. The same logic is available programmatically as `backfillAccountIssuers({ firestore, dryRun, issuers, resolveIssuer, … })`.
+
+**If you forget:** the adapter checks on startup and logs a `[better-auth-firestore]` warning with the exact command whenever Better Auth expects `issuer` but account documents lack it (two aggregation reads per process; `migrationChecks: false` disables it).
 
 Run the backfill (dry run, then real) before your first deploy on Better Auth 1.7; it ships in v1.3 and is harmless on 1.6. Once you're on v1.3 you can also delete the `rateLimit` composite indexes; see [Firestore Index](#3-firestore-index-optional).
 
@@ -501,7 +490,7 @@ Note that Firestore emulators do **not** enforce composite indexes, so index fai
 
 **Symptom:** Sign-up works, but accounts created before the upgrade fail to sign in (email/password reports invalid credentials; social sign-in reports the account as not linked, or links a duplicate account to the email-matched user).
 
-**Fix:** Run `backfillAccountIssuers` once to stamp the `issuer` field 1.7 uses to look accounts up. See [Upgrading to Better Auth 1.7](#upgrading-to-better-auth-17).
+**Fix:** Run `npx better-auth-firestore backfill-account-issuers --apply` once to stamp the `issuer` field 1.7 uses to look accounts up (dry run first without `--apply`). The adapter logs the same command at startup while documents are missing it. See [Upgrading to Better Auth 1.7](#upgrading-to-better-auth-17).
 
 ## FAQ
 

@@ -17,6 +17,13 @@ export interface FirestoreAdapterConfig extends AppOptions {
 	namingStrategy?: NamingStrategy;
 	collections?: FirestoreCollectionsOverride;
 	debugLogs?: DBAdapterDebugLogOption;
+	/**
+	 * On startup, warn once (via `console.warn`) when the Better Auth version
+	 * in use expects `account.issuer` but existing account documents lack it —
+	 * the symptom is that pre-1.7 users cannot sign in. Costs two aggregation
+	 * reads per process. Default `true`.
+	 */
+	migrationChecks?: boolean;
 }
 
 export interface InternalNormalizedConfig {
