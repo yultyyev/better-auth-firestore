@@ -111,9 +111,15 @@ Better Auth 1.7 needs adapter **v1.3+** (it made `incrementOne` a required adapt
 # Same credentials as the app (GOOGLE_APPLICATION_CREDENTIALS, FIREBASE_* vars, or --service-account key.json)
 npx better-auth-firestore backfill-account-issuers            # dry run — review the report
 npx better-auth-firestore backfill-account-issuers --apply    # write, with auth writes paused
-# add --collection / --naming-strategy snake_case to match the adapter config,
-# --issuer okta=https://acme.okta.com only for providers with a real issuer
+# add --collection / --naming-strategy snake_case to match the adapter config.
+# google/apple/facebook/line resolve to their real issuer automatically; pass
+# --issuer <providerId>=<url> for providers whose issuer depends on config or
+# the token — cognito, paybin, microsoft (Entra ID), okta, auth0, keycloak —
+# e.g. --issuer okta=https://acme.okta.com. They are reported unresolved
+# (exit 1) until you do, rather than stamped with a value that may be wrong.
 ```
+
+> Ran the backfill on adapter **v1.3.0**? It stamped `local:oauth:google` (and the same for `apple`/`facebook`/`line`) instead of the real issuer, so those users still can't sign in. Upgrade and re-run the command — it detects and repairs those documents, reporting them as "wrong issuers left by the v1.3.0 backfill". The startup warning cannot catch this: the field is present, just wrong.
 
 Programmatic equivalent: `backfillAccountIssuers({ firestore, dryRun, issuers, resolveIssuer })`. The adapter also warns once at startup (`[better-auth-firestore] … Run: npx better-auth-firestore backfill-account-issuers …`) when account documents lack `issuer`; `migrationChecks: false` disables the check.
 
@@ -211,6 +217,7 @@ No credentials or service account needed when using the emulator.
 - **`The query requires an index` on `rateLimit`** — You're on a version older than v1.3. Upgrade; the native `incrementOne` needs no composite index. Do not create the index.
 - **`Adapter "firestore" must implement incrementOne`** — Better Auth 1.7 with an adapter older than v1.3. Upgrade `better-auth-firestore`.
 - **Existing users can't sign in after moving to Better Auth 1.7** — The `account.issuer` backfill was not run (the server log shows a `[better-auth-firestore]` warning with the command). Run `npx better-auth-firestore backfill-account-issuers --apply` (see above).
+- **Only the social users can't sign in, and the backfill reports nothing to do** — You ran the backfill on adapter v1.3.0, which stamped `local:oauth:google` instead of `https://accounts.google.com` (same for `apple`/`facebook`/`line`). The field is present but wrong, so the startup warning stays silent. Upgrade the adapter and re-run `backfill-account-issuers --apply`; it repairs those documents.
 - **FIREBASE_PRIVATE_KEY with literal `\n`** — Always call `.replace(/\\n/g, "\n")` on the key before passing to `cert()`.
 - **Using at edge runtime** — Firebase Admin SDK does not run on Vercel Edge or Cloudflare Workers. Use Node.js runtimes only.
 - **`npm error 404` on `@yultyyev/better-auth-firestore`** — The scoped package was unpublished from npm (2026-08). Switch the dependency and import path to `better-auth-firestore`; the API is identical.

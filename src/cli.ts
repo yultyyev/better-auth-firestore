@@ -27,8 +27,11 @@ Options for backfill-account-issuers:
   --apply                    Write the changes (default: dry run, report only)
   --collection <name>        Accounts collection (default: accounts)
   --naming-strategy <s>      "default" or "snake_case", as passed to firestoreAdapter
-  --issuer <providerId=url>  Issuer for a provider that publishes one (repeatable),
-                             e.g. --issuer okta=https://acme.okta.com
+  --issuer <providerId=url>  Issuer for a provider whose real one can't be resolved
+                             offline (repeatable), e.g. --issuer okta=https://acme.okta.com.
+                             Required for cognito, paybin, microsoft (Entra ID),
+                             okta, auth0, keycloak, microsoft-entra-id — google,
+                             apple, facebook and line resolve on their own.
   --overwrite                Re-stamp documents that already have an issuer
   --batch-size <n>           Documents per page / write batch, 1-500 (default: 500)
   --service-account <file>   Service-account JSON to authenticate with
@@ -155,6 +158,17 @@ function formatReport(
 		lines.push(
 			`  credential accountId ${apply ? "repaired" : "to repair"} (set to userId): ${result.credentialAccountIdsRepaired}`,
 		);
+	if (result.legacyIssuersRepaired.length > 0) {
+		// These accounts could not sign in on 1.7: adapter v1.3.0's backfill
+		// stamped the synthetic issuer on a provider that publishes a real one.
+		lines.push(
+			`  wrong issuers left by the v1.3.0 backfill ${apply ? "repaired" : "to repair"}: ${result.legacyIssuersRepaired.length}`,
+		);
+		for (const r of result.legacyIssuersRepaired.slice(0, 20))
+			lines.push(`    ${r.id}: ${r.from} → ${r.to}`);
+		if (result.legacyIssuersRepaired.length > 20)
+			lines.push(`    … ${result.legacyIssuersRepaired.length - 20} more`);
+	}
 	const byIssuer = Object.entries(result.byIssuer).sort(
 		([, a], [, b]) => b - a,
 	);
@@ -165,7 +179,8 @@ function formatReport(
 	}
 	if (result.unresolved.length > 0) {
 		lines.push(
-			"  unresolved (no providerId, or the resolver returned nothing) — document ids:",
+			"  unresolved (no providerId, the resolver returned nothing, or the provider's",
+			"  real issuer isn't knowable offline — pass --issuer) — document ids:",
 		);
 		for (const id of result.unresolved.slice(0, 20)) lines.push(`    ${id}`);
 		if (result.unresolved.length > 20)
