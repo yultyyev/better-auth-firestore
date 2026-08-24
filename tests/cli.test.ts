@@ -65,7 +65,7 @@ describe("backfill-account-issuers CLI", () => {
 		expect(text()).toContain("Dry run over 2 account documents");
 		expect(text()).toContain("would update: 2");
 		expect(text()).toContain("local:credential  1");
-		expect(text()).toContain("local:oauth:google  1");
+		expect(text()).toContain("https://accounts.google.com  1");
 		expect(text()).toContain("Nothing was written");
 		expect((await accounts.doc("c1").get()).data()?.issuer).toBeUndefined();
 	});

@@ -7,8 +7,10 @@ import type { NamingStrategy } from "./types.js";
 // users get the column from `npx auth migrate` plus a backfill from the
 // upgrade guide; Firestore has no migration runner, so this helper stamps
 // `issuer` onto existing account documents using the same rules 1.7 applies
-// when it creates accounts. Rows that are never backfilled are invisible to
-// 1.7's lookups — existing users can't sign in.
+// when it creates accounts — falling back to `issuers`/`resolveIssuer`
+// rather than guessing for the handful of built-in providers whose real
+// issuer isn't knowable offline. Rows that are never backfilled are
+// invisible to 1.7's lookups — existing users can't sign in.
 //
 // https://better-auth.com/docs/guides/1-7-upgrade-guide
 
@@ -21,9 +23,11 @@ export function localAccountIssuer(providerId: string): string {
 }
 
 /**
- * Issuer for an OAuth provider that doesn't publish one of its own
- * (every built-in social provider) — mirrors `createOAuthAccountIssuer` in
- * `@better-auth/core`.
+ * Issuer for an OAuth provider that doesn't publish one of its own — mirrors
+ * `createOAuthAccountIssuer` in `@better-auth/core`. Most built-in social
+ * providers fall into this case, but not all: see {@link KNOWN_OAUTH_ISSUERS}
+ * and {@link UNRESOLVABLE_OAUTH_PROVIDERS} for the exceptions this module's
+ * default resolution already accounts for.
  */
 export function oauthAccountIssuer(providerId: string): string {
 	return `local:oauth:${encodeURIComponent(providerId)}`;
@@ -61,11 +65,14 @@ export interface BackfillAccountIssuersOptions {
 		issuer?: string;
 	};
 	/**
-	 * Explicit issuer per `providerId`, for providers that confirm a real
-	 * issuer: Google One Tap (`https://accounts.google.com`), generic OAuth
-	 * providers configured with discovery or `accountIssuer` (Okta, Auth0,
-	 * Keycloak, Entra ID, …). Unlisted OAuth providers get the synthetic
-	 * `local:oauth:<providerId>` issuer that 1.7 assigns them.
+	 * Explicit issuer per `providerId`. Required for built-in providers
+	 * whose real issuer can't be guessed offline — `cognito`, `paybin`,
+	 * `microsoft` (Entra ID) — and for any generic OAuth provider configured
+	 * with discovery or a custom `accountIssuer` (Okta, Auth0, Keycloak, …).
+	 * `apple`, `facebook`, `google`, and `line` resolve to their real issuer
+	 * automatically; every other built-in provider gets the synthetic
+	 * `local:oauth:<providerId>` issuer 1.7 assigns them when it has no
+	 * `accountIssuer` of its own.
 	 */
 	issuers?: Record<string, string>;
 	/**
@@ -88,13 +95,26 @@ export interface BackfillAccountIssuersResult {
 	updated: number;
 	/** Documents left alone because they already had an issuer. */
 	skipped: number;
-	/** Documents with no `providerId`, or whose resolver returned nothing. */
+	/**
+	 * Documents with no `providerId`, whose resolver returned nothing, or
+	 * whose provider's real issuer isn't knowable offline (`cognito`,
+	 * `paybin`, `microsoft`) — pass `issuers`/`resolveIssuer` for those.
+	 */
 	unresolved: string[];
 	/**
 	 * Credential accounts whose `accountId` was repaired to equal `userId`.
 	 * 1.7 looks credential accounts up by `accountId === user.id`.
 	 */
 	credentialAccountIdsRepaired: number;
+	/**
+	 * Documents whose `issuer` this package's v1.3.0 backfill stamped with the
+	 * synthetic `local:oauth:<providerId>` form for a provider that actually
+	 * publishes a real one (`google`, `apple`, `facebook`, `line`), and which
+	 * were re-stamped with the real issuer. Those accounts could not sign in
+	 * on 1.7 until this ran. Empty for a deployment that never ran the v1.3.0
+	 * backfill.
+	 */
+	legacyIssuersRepaired: { id: string; from: string; to: string }[];
 	/** Number of documents per issuer, after the backfill. */
 	byIssuer: Record<string, number>;
 	/**
@@ -107,11 +127,85 @@ export interface BackfillAccountIssuersResult {
 const CREDENTIAL_PROVIDER = "credential";
 const SIWE_PROVIDER = "siwe";
 
-function defaultIssuerFor(providerId: string): string {
+/**
+ * providerId -> issuer for built-in social providers whose `accountIssuer`
+ * (in `@better-auth/core/social-providers`) is a fixed string, independent
+ * of how the provider is configured. Verified against
+ * `@better-auth/core@1.7.1`: `apple`, `facebook`, `google`, and `line` hard-code
+ * these as literals; every other built-in provider either has no
+ * `accountIssuer` at all (so 1.7 itself falls back to the synthetic
+ * `local:oauth:<providerId>` form we mirror below) or one that can't be
+ * guessed offline — see {@link UNRESOLVABLE_OAUTH_PROVIDERS}.
+ */
+const KNOWN_OAUTH_ISSUERS: Record<string, string> = {
+	apple: "https://appleid.apple.com",
+	facebook: "https://www.facebook.com",
+	google: "https://accounts.google.com",
+	line: "https://access.line.me",
+};
+
+/**
+ * Providers that carry a real `accountIssuer` we cannot determine from a
+ * `providerId` alone, because it depends on how the provider was configured
+ * (or on the token itself). Left unresolved rather than stamped with a value
+ * we know may be wrong — pass `--issuer` / `issuers` for them.
+ *
+ * Built-in social providers: `cognito` templates its issuer from
+ * `region`/`userPoolId`, `paybin` from a configurable `issuer` option (it has
+ * a hosted default, but a self-hosted deployment overrides it), and
+ * `microsoft` — the built-in Entra ID provider's actual `id` — computes it
+ * from the live token's `iss` claim.
+ *
+ * better-auth also ships generic-OAuth helpers with fixed `providerId`s that
+ * always carry a real issuer: `okta` and `keycloak` (`accountIssuer: issuer`),
+ * `auth0` (`https://<domain>/`), and `microsoft-entra-id` (no `accountIssuer`,
+ * but a `discoveryUrl`, and the plugin resolves `accountIssuer ?? issuer` to
+ * the discovered issuer).
+ *
+ * Deliberately NOT listed: `slack`. The generic-OAuth `slack` helper declares
+ * `https://slack.com`, but the built-in social `slack` provider declares no
+ * issuer and so genuinely resolves to the synthetic form. The two are
+ * indistinguishable by `providerId`, and the built-in provider is the common
+ * case, so `slack` keeps the synthetic default — pass `--issuer
+ * slack=https://slack.com` if you use the generic-OAuth helper.
+ */
+const UNRESOLVABLE_OAUTH_PROVIDERS = new Set([
+	// Built-in social providers.
+	"cognito",
+	"paybin",
+	"microsoft",
+	// Fixed-providerId generic-OAuth helpers.
+	"okta",
+	"auth0",
+	"keycloak",
+	"microsoft-entra-id",
+]);
+
+function defaultIssuerFor(providerId: string): string | undefined {
 	if (providerId === CREDENTIAL_PROVIDER)
 		return localAccountIssuer(CREDENTIAL_PROVIDER);
 	if (providerId === SIWE_PROVIDER) return localAccountIssuer(SIWE_PROVIDER);
+	if (providerId in KNOWN_OAUTH_ISSUERS) return KNOWN_OAUTH_ISSUERS[providerId];
+	if (UNRESOLVABLE_OAUTH_PROVIDERS.has(providerId)) return undefined;
 	return oauthAccountIssuer(providerId);
+}
+
+/**
+ * True when a document's existing `issuer` is one this package's own v1.3.0
+ * backfill wrote incorrectly: the synthetic `local:oauth:<providerId>` form
+ * on a provider that publishes a fixed real issuer. Better Auth never writes
+ * that pairing itself — 1.7 uses the real issuer — so it can only be the
+ * legacy backfill's, and re-stamping it is safe. Anything else that's already
+ * stamped is left alone: it may be a deliberate `issuers`/`resolveIssuer`
+ * value, or one 1.7 wrote at runtime.
+ */
+function isLegacyMisstampedIssuer(
+	providerId: string | undefined,
+	issuer: string,
+): boolean {
+	if (!providerId) return false;
+	if (!(providerId in KNOWN_OAUTH_ISSUERS)) return false;
+	return issuer === oauthAccountIssuer(providerId);
 }
 
 const asString = (value: unknown): string | undefined =>
@@ -120,9 +214,12 @@ const asString = (value: unknown): string | undefined =>
 /**
  * Stamps `account.issuer` onto existing account documents for the Better
  * Auth 1.7 identity model. Idempotent: documents that already carry an
- * issuer are skipped unless `overwrite` is set. Run it once, with
- * authentication writes paused, before deploying Better Auth 1.7 — and run
- * it with `dryRun: true` first to review the report.
+ * issuer are skipped unless `overwrite` is set — except for issuers this
+ * package's own v1.3.0 backfill provably got wrong, which are repaired and
+ * reported as {@link BackfillAccountIssuersResult.legacyIssuersRepaired}
+ * (see {@link isLegacyMisstampedIssuer}). Run it once, with authentication
+ * writes paused, before deploying Better Auth 1.7 — and run it with
+ * `dryRun: true` first to review the report.
  */
 export async function backfillAccountIssuers(
 	options: BackfillAccountIssuersOptions = {},
@@ -144,6 +241,7 @@ export async function backfillAccountIssuers(
 		skipped: 0,
 		unresolved: [],
 		credentialAccountIdsRepaired: 0,
+		legacyIssuersRepaired: [],
 		byIssuer: {},
 		collisions: [],
 	};
@@ -179,7 +277,15 @@ export async function backfillAccountIssuers(
 				data,
 			};
 
-			if (account.issuer && !options.overwrite) {
+			// A document already carrying an issuer is normally left alone. The
+			// exception is one our own v1.3.0 backfill provably mis-stamped:
+			// leaving it would mean the operator re-runs the fixed command,
+			// sees a clean report, and is still broken at sign-in.
+			const legacyMisstamp =
+				account.issuer !== undefined &&
+				isLegacyMisstampedIssuer(account.providerId, account.issuer);
+
+			if (account.issuer && !options.overwrite && !legacyMisstamp) {
 				result.skipped++;
 				track(account.issuer, account.accountId, doc.id);
 				continue;
@@ -194,6 +300,18 @@ export async function backfillAccountIssuers(
 			if (!issuer) {
 				result.unresolved.push(doc.id);
 				continue;
+			}
+
+			if (
+				legacyMisstamp &&
+				account.issuer !== undefined &&
+				issuer !== account.issuer
+			) {
+				result.legacyIssuersRepaired.push({
+					id: doc.id,
+					from: account.issuer,
+					to: issuer,
+				});
 			}
 
 			const update: Record<string, unknown> = { [fields.issuer]: issuer };

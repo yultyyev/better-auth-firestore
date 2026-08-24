@@ -87,7 +87,7 @@ describe("backfillAccountIssuers", () => {
 		});
 		expect(result.byIssuer).toEqual({
 			"local:credential": 1,
-			"local:oauth:google": 1,
+			"https://accounts.google.com": 1,
 			"local:siwe": 1,
 			"local:oauth:team%2Fgithub": 1,
 			"https://already.example": 1,
@@ -96,7 +96,7 @@ describe("backfillAccountIssuers", () => {
 			"local:credential",
 		);
 		expect((await accounts.doc("google").get()).data()?.issuer).toBe(
-			"local:oauth:google",
+			"https://accounts.google.com",
 		);
 		expect((await accounts.doc("siwe").get()).data()?.issuer).toBe(
 			"local:siwe",
@@ -114,6 +114,243 @@ describe("backfillAccountIssuers", () => {
 			collection: ACCOUNTS,
 		});
 		expect(again).toMatchObject({ scanned: 5, updated: 0, skipped: 5 });
+	});
+
+	it("resolves the real issuer for providers that publish one, and refuses to guess for the rest", async () => {
+		// google/apple/facebook/line hard-code a real `accountIssuer` in
+		// @better-auth/core's provider factories — 1.7 never assigns them the
+		// synthetic `local:oauth:<providerId>` form, so backfilling them with
+		// it would leave those accounts permanently unfindable after upgrading.
+		// This is the regression test for that bug: it asserts the resolved
+		// key actually matches what 1.7 looks accounts up by, not just that
+		// the migration runs without error.
+		const REAL_ISSUER_PROVIDERS: Record<string, string> = {
+			google: "https://accounts.google.com",
+			apple: "https://appleid.apple.com",
+			facebook: "https://www.facebook.com",
+			line: "https://access.line.me",
+		};
+		for (const providerId of Object.keys(REAL_ISSUER_PROVIDERS)) {
+			await accounts
+				.doc(providerId)
+				.set({ providerId, accountId: `${providerId}-1`, userId: "user-1" });
+		}
+
+		// cognito's issuer is templated from the `region`/`userPoolId` passed
+		// to the provider, paybin's from a configurable `issuer` option, and
+		// microsoft's (the built-in Entra ID provider's id) is computed from
+		// the live token's `iss` claim — none are guessable from `providerId`
+		// alone, so stamping the synthetic form for them would be silently
+		// wrong. They must come back unresolved rather than guessed.
+		const UNRESOLVABLE_PROVIDERS = ["cognito", "paybin", "microsoft"];
+		for (const providerId of UNRESOLVABLE_PROVIDERS) {
+			await accounts
+				.doc(providerId)
+				.set({ providerId, accountId: `${providerId}-1`, userId: "user-1" });
+		}
+
+		const result = await backfillAccountIssuers({
+			firestore: db,
+			collection: ACCOUNTS,
+		});
+
+		expect(result.updated).toBe(Object.keys(REAL_ISSUER_PROVIDERS).length);
+		expect(result.unresolved.sort()).toEqual([...UNRESOLVABLE_PROVIDERS].sort());
+		for (const [providerId, issuer] of Object.entries(REAL_ISSUER_PROVIDERS)) {
+			expect((await accounts.doc(providerId).get()).data()?.issuer).toBe(
+				issuer,
+			);
+		}
+		for (const providerId of UNRESOLVABLE_PROVIDERS) {
+			expect((await accounts.doc(providerId).get()).data()?.issuer).toBeUndefined();
+		}
+
+		// The caller can still resolve them explicitly, same as any other
+		// provider with a real but unguessable issuer (Okta, Auth0, ...).
+		// Entra ID's real `iss` carries the user's own tenant GUID — there is
+		// no `common` issuer — which is exactly why it can't be guessed here.
+		const ENTRA_TENANT_ISSUER =
+			"https://login.microsoftonline.com/9122040d-6c67-4c5b-b112-36a304b66dad/v2.0";
+		const resolved = await backfillAccountIssuers({
+			firestore: db,
+			collection: ACCOUNTS,
+			issuers: {
+				cognito: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc123",
+				paybin: "https://idp.paybin.io",
+				microsoft: ENTRA_TENANT_ISSUER,
+			},
+		});
+		expect(resolved.unresolved).toEqual([]);
+		expect((await accounts.doc("microsoft").get()).data()?.issuer).toBe(
+			ENTRA_TENANT_ISSUER,
+		);
+	});
+
+	// The bug this module got wrong was a claim ABOUT THE DEPENDENCY, so the
+	// regression test has to ask the dependency rather than restate our own
+	// table back to itself. Constructing every provider twice with different
+	// options separates an issuer that is a fixed property of the provider
+	// (must be stamped) from one derived from configuration (must not be
+	// guessed) — no issuer literal is hardcoded here.
+	it.skipIf(!LOOKUPS_REQUIRE_ISSUER)(
+		"stamps exactly what the installed better-auth would look accounts up by",
+		async () => {
+			const { socialProviders } = (await import(
+				"better-auth/social-providers"
+			)) as { socialProviders: Record<string, (o: never) => unknown> };
+
+			const OPTIONS_A = {
+				clientId: "id",
+				clientSecret: "secret",
+				region: "us-east-1",
+				userPoolId: "pool-a",
+				domain: "a.example",
+				issuer: "https://a.example",
+				tenantId: "tenant-a",
+			};
+			const OPTIONS_B = {
+				clientId: "id",
+				clientSecret: "secret",
+				region: "eu-west-1",
+				userPoolId: "pool-b",
+				domain: "b.example",
+				issuer: "https://b.example",
+				tenantId: "tenant-b",
+			};
+			const issuerOf = (factory: (o: never) => unknown, options: object) =>
+				(factory(options as never) as { accountIssuer?: unknown })
+					.accountIssuer;
+
+			const fixed = new Map<string, string>();
+			const configDependent: string[] = [];
+			const none: string[] = [];
+			for (const factory of Object.values(socialProviders)) {
+				const a = issuerOf(factory, OPTIONS_A);
+				const b = issuerOf(factory, OPTIONS_B);
+				const id = (factory(OPTIONS_A as never) as { id: string }).id;
+				if (a === undefined) none.push(id);
+				else if (typeof a === "string" && a === b) fixed.set(id, a);
+				else configDependent.push(id);
+			}
+			// Guard against the enumeration silently going empty.
+			expect(fixed.size).toBeGreaterThan(0);
+			expect(configDependent.length).toBeGreaterThan(0);
+			expect(none.length).toBeGreaterThan(0);
+
+			const ids = [...fixed.keys(), ...configDependent, ...none];
+			await Promise.all(
+				ids.map((id) =>
+					accounts.doc(id).set({
+						providerId: id,
+						accountId: `${id}-1`,
+						userId: `u-${id}`,
+					}),
+				),
+			);
+
+			const result = await backfillAccountIssuers({
+				firestore: db,
+				collection: ACCOUNTS,
+			});
+
+			for (const [id, issuer] of fixed) {
+				expect(
+					(await accounts.doc(id).get()).data()?.issuer,
+					`${id} must be stamped with the issuer better-auth declares`,
+				).toBe(issuer);
+			}
+			for (const id of configDependent) {
+				expect(
+					result.unresolved,
+					`${id}'s issuer depends on configuration — it must not be guessed`,
+				).toContain(id);
+			}
+			for (const id of none) {
+				expect(
+					(await accounts.doc(id).get()).data()?.issuer,
+					`${id} declares no issuer, so 1.7 uses the synthetic form`,
+				).toBe(oauthAccountIssuer(id));
+			}
+		},
+	);
+
+	it("repairs issuers the v1.3.0 backfill stamped wrong, without touching deliberate ones", async () => {
+		// What a deployment that ran adapter v1.3.0's backfill is left with:
+		// providers that publish a real issuer got the synthetic form instead,
+		// so 1.7 can't find them and those users can't sign in. Re-running the
+		// fixed command must repair them — the skip-if-stamped rule would
+		// otherwise report a clean run and leave them broken.
+		await accounts.doc("google").set({
+			providerId: "google",
+			accountId: "g-1",
+			userId: "user-1",
+			issuer: "local:oauth:google",
+		});
+		await accounts.doc("apple").set({
+			providerId: "apple",
+			accountId: "a-1",
+			userId: "user-2",
+			issuer: "local:oauth:apple",
+		});
+		// Must be left alone: a synthetic issuer is genuinely correct here.
+		await accounts.doc("github").set({
+			providerId: "github",
+			accountId: "gh-1",
+			userId: "user-3",
+			issuer: "local:oauth:github",
+		});
+		// Must be left alone: a deliberate issuer for a provider that has one.
+		await accounts.doc("okta").set({
+			providerId: "okta",
+			accountId: "00u1",
+			userId: "user-4",
+			issuer: "https://acme.okta.com",
+		});
+
+		const dry = await backfillAccountIssuers({
+			firestore: db,
+			collection: ACCOUNTS,
+			dryRun: true,
+		});
+		expect(dry.legacyIssuersRepaired).toEqual([
+			{ id: "apple", from: "local:oauth:apple", to: "https://appleid.apple.com" },
+			{
+				id: "google",
+				from: "local:oauth:google",
+				to: "https://accounts.google.com",
+			},
+		]);
+		expect(dry.skipped).toBe(2);
+		// dryRun still wrote nothing.
+		expect((await accounts.doc("google").get()).data()?.issuer).toBe(
+			"local:oauth:google",
+		);
+
+		const real = await backfillAccountIssuers({
+			firestore: db,
+			collection: ACCOUNTS,
+		});
+		expect(real.legacyIssuersRepaired).toHaveLength(2);
+		expect((await accounts.doc("google").get()).data()?.issuer).toBe(
+			"https://accounts.google.com",
+		);
+		expect((await accounts.doc("apple").get()).data()?.issuer).toBe(
+			"https://appleid.apple.com",
+		);
+		expect((await accounts.doc("github").get()).data()?.issuer).toBe(
+			"local:oauth:github",
+		);
+		expect((await accounts.doc("okta").get()).data()?.issuer).toBe(
+			"https://acme.okta.com",
+		);
+
+		// Idempotent: a second run finds nothing left to repair.
+		const again = await backfillAccountIssuers({
+			firestore: db,
+			collection: ACCOUNTS,
+		});
+		expect(again.legacyIssuersRepaired).toEqual([]);
+		expect(again.skipped).toBe(4);
 	});
 
 	it("honours `issuers` overrides and a custom resolver, in that order of precedence", async () => {
