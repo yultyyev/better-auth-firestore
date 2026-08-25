@@ -173,6 +173,16 @@ write_tsconfig bundler preserve
 echo "==> resolving the entry point"
 (cd "$CONSUMER" && node ./esm-smoke.mjs && node ./cjs-smoke.cjs)
 
+# Tooling routinely reads a dependency's manifest by subpath (version checks,
+# bundler plugins, `require.resolve`). An `exports` map that omits it makes
+# that throw ERR_PACKAGE_PATH_NOT_EXPORTED, so assert it stays reachable.
+echo "==> resolving package.json by subpath"
+if ! (cd "$CONSUMER" && node -e 'require("better-auth-firestore/package.json")'); then
+	echo "error: better-auth-firestore/package.json is not resolvable — add it to \"exports\"" >&2
+	exit 1
+fi
+echo "    ok  require(\"better-auth-firestore/package.json\")"
+
 echo "==> running the CLI from the installed package"
 BIN="$CONSUMER/node_modules/.bin/better-auth-firestore"
 if [[ ! -x "$BIN" ]]; then
