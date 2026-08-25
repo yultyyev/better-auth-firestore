@@ -169,6 +169,18 @@ function formatReport(
 		if (result.legacyIssuersRepaired.length > 20)
 			lines.push(`    … ${result.legacyIssuersRepaired.length - 20} more`);
 	}
+	if (result.legacySupersededSkipped.length > 0) {
+		// Left alone on purpose: the user self-healed during the outage, so a
+		// correctly stamped row already owns this (issuer, accountId).
+		lines.push(
+			`  stale duplicates left by the v1.3.0 backfill, superseded by a correctly`,
+			`  stamped account — inert, delete at your discretion: ${result.legacySupersededSkipped.length}`,
+		);
+		for (const s of result.legacySupersededSkipped.slice(0, 20))
+			lines.push(`    ${s.id}  (${s.issuer} / ${s.accountId})`);
+		if (result.legacySupersededSkipped.length > 20)
+			lines.push(`    … ${result.legacySupersededSkipped.length - 20} more`);
+	}
 	const byIssuer = Object.entries(result.byIssuer).sort(
 		([, a], [, b]) => b - a,
 	);

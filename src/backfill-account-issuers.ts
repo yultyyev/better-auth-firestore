@@ -115,6 +115,16 @@ export interface BackfillAccountIssuersResult {
 	 * backfill.
 	 */
 	legacyIssuersRepaired: { id: string; from: string; to: string }[];
+	/**
+	 * Documents the v1.3.0 backfill mis-stamped that were **not** repaired,
+	 * because a correctly stamped document already claims their
+	 * `(issuer, accountId)` pair — the user signed in during the outage and
+	 * 1.7's email-linking branch wrote a fresh account row. Re-stamping the
+	 * stale twin would collide on a pair 1.7 treats as unique, so it keeps
+	 * its old issuer: inert, invisible to 1.7's lookups, and safe to delete
+	 * at the operator's discretion.
+	 */
+	legacySupersededSkipped: { id: string; issuer: string; accountId: string }[];
 	/** Number of documents per issuer, after the backfill. */
 	byIssuer: Record<string, number>;
 	/**
@@ -242,6 +252,7 @@ export async function backfillAccountIssuers(
 		unresolved: [],
 		credentialAccountIdsRepaired: 0,
 		legacyIssuersRepaired: [],
+		legacySupersededSkipped: [],
 		byIssuer: {},
 		collisions: [],
 	};
@@ -255,6 +266,14 @@ export async function backfillAccountIssuers(
 		if (ids) ids.push(id);
 		else byKey.set(key, [id]);
 	};
+
+	// Documents the v1.3.0 backfill mis-stamped, held back until every other
+	// document has been read so their repair target can be checked for an
+	// existing claim.
+	const pendingLegacy: {
+		ref: FirebaseFirestore.DocumentReference;
+		account: BackfillAccountRecord;
+	}[] = [];
 
 	let last: FirebaseFirestore.QueryDocumentSnapshot | undefined;
 	for (;;) {
@@ -280,12 +299,19 @@ export async function backfillAccountIssuers(
 			// A document already carrying an issuer is normally left alone. The
 			// exception is one our own v1.3.0 backfill provably mis-stamped:
 			// leaving it would mean the operator re-runs the fixed command,
-			// sees a clean report, and is still broken at sign-in.
-			const legacyMisstamp =
+			// sees a clean report, and is still broken at sign-in. Those are
+			// deferred to a second phase — the repair target may already be
+			// claimed by another document, which we only know once every
+			// document has been read.
+			if (
 				account.issuer !== undefined &&
-				isLegacyMisstampedIssuer(account.providerId, account.issuer);
+				isLegacyMisstampedIssuer(account.providerId, account.issuer)
+			) {
+				pendingLegacy.push({ ref: doc.ref, account });
+				continue;
+			}
 
-			if (account.issuer && !options.overwrite && !legacyMisstamp) {
+			if (account.issuer && !options.overwrite) {
 				result.skipped++;
 				track(account.issuer, account.accountId, doc.id);
 				continue;
@@ -300,18 +326,6 @@ export async function backfillAccountIssuers(
 			if (!issuer) {
 				result.unresolved.push(doc.id);
 				continue;
-			}
-
-			if (
-				legacyMisstamp &&
-				account.issuer !== undefined &&
-				issuer !== account.issuer
-			) {
-				result.legacyIssuersRepaired.push({
-					id: doc.id,
-					from: account.issuer,
-					to: issuer,
-				});
 			}
 
 			const update: Record<string, unknown> = { [fields.issuer]: issuer };
@@ -338,6 +352,55 @@ export async function backfillAccountIssuers(
 		last = page.docs[page.docs.length - 1];
 		if (page.size < batchSize) break;
 	}
+
+	// Phase two: repair what v1.3.0 mis-stamped, now that every pair claimed
+	// by a document we are not rewriting is known. A user who signed in
+	// during the outage self-healed through 1.7's email-linking branch and
+	// already has a correctly stamped row for this `(issuer, accountId)`.
+	// Re-stamping the stale twin would manufacture exactly the collision this
+	// command tells operators to resolve by hand, so it is left as it is:
+	// 1.7 never looks the synthetic issuer up, which makes the row inert.
+	// Deleting it is the operator's call, not a migration's.
+	let legacyBatch = db.batch();
+	let legacyStaged = 0;
+	for (const { ref, account } of pendingLegacy) {
+		const issuer =
+			options.resolveIssuer?.(account) ??
+			(account.providerId ? options.issuers?.[account.providerId] : undefined) ??
+			(account.providerId ? defaultIssuerFor(account.providerId) : undefined);
+		if (!issuer) {
+			result.unresolved.push(ref.id);
+			continue;
+		}
+
+		const { accountId } = account;
+		if (accountId !== undefined && byKey.has(JSON.stringify([issuer, accountId]))) {
+			result.legacySupersededSkipped.push({ id: ref.id, issuer, accountId });
+			result.skipped++;
+			// The row keeps its old issuer, so report it under that.
+			if (account.issuer !== undefined)
+				track(account.issuer, accountId, ref.id);
+			continue;
+		}
+
+		if (account.issuer !== undefined && issuer !== account.issuer)
+			result.legacyIssuersRepaired.push({
+				id: ref.id,
+				from: account.issuer,
+				to: issuer,
+			});
+		track(issuer, accountId, ref.id);
+		result.updated++;
+		if (!options.dryRun) {
+			legacyBatch.update(ref, { [fields.issuer]: issuer });
+			if (++legacyStaged >= batchSize) {
+				await legacyBatch.commit();
+				legacyBatch = db.batch();
+				legacyStaged = 0;
+			}
+		}
+	}
+	if (legacyStaged > 0) await legacyBatch.commit();
 
 	for (const [key, ids] of byKey) {
 		if (ids.length < 2) continue;
