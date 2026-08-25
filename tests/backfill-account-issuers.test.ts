@@ -353,6 +353,75 @@ describe("backfillAccountIssuers", () => {
 		expect(again.skipped).toBe(4);
 	});
 
+	it("leaves a mis-stamped row alone when a self-healed account already owns the pair", async () => {
+		// Users who signed in during the outage self-healed: 1.7's email-linking
+		// branch wrote a fresh, correctly stamped account row and left the
+		// v1.3.0 row behind as a stale twin. Repairing that twin would give two
+		// documents the same `(issuer, accountId)` — the exact condition this
+		// command tells operators to resolve by hand before deploying. Leave it.
+		await accounts.doc("stale").set({
+			providerId: "google",
+			accountId: "sub-123",
+			userId: "user-1",
+			issuer: "local:oauth:google",
+		});
+		await accounts.doc("healed").set({
+			providerId: "google",
+			accountId: "sub-123",
+			userId: "user-1",
+			issuer: "https://accounts.google.com",
+		});
+		// A mis-stamped row with no correctly stamped twin is still repaired,
+		// in the same run.
+		await accounts.doc("orphan").set({
+			providerId: "google",
+			accountId: "sub-456",
+			userId: "user-2",
+			issuer: "local:oauth:google",
+		});
+
+		const result = await backfillAccountIssuers({
+			firestore: db,
+			collection: ACCOUNTS,
+		});
+
+		expect(result.collisions).toEqual([]);
+		expect(result.legacySupersededSkipped).toEqual([
+			{
+				id: "stale",
+				issuer: "https://accounts.google.com",
+				accountId: "sub-123",
+			},
+		]);
+		expect(result.legacyIssuersRepaired).toEqual([
+			{
+				id: "orphan",
+				from: "local:oauth:google",
+				to: "https://accounts.google.com",
+			},
+		]);
+		// The stale twin keeps the issuer 1.7 never looks up, so it stays inert
+		// rather than becoming a duplicate.
+		expect((await accounts.doc("stale").get()).data()?.issuer).toBe(
+			"local:oauth:google",
+		);
+		expect((await accounts.doc("healed").get()).data()?.issuer).toBe(
+			"https://accounts.google.com",
+		);
+		expect((await accounts.doc("orphan").get()).data()?.issuer).toBe(
+			"https://accounts.google.com",
+		);
+
+		const again = await backfillAccountIssuers({
+			firestore: db,
+			collection: ACCOUNTS,
+		});
+		expect(again.collisions).toEqual([]);
+		expect(again.legacyIssuersRepaired).toEqual([]);
+		expect(again.legacySupersededSkipped).toHaveLength(1);
+		expect(again.updated).toBe(0);
+	});
+
 	it("honours `issuers` overrides and a custom resolver, in that order of precedence", async () => {
 		await accounts.doc("okta").set({
 			providerId: "okta",
