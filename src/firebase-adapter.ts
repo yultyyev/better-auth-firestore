@@ -635,10 +635,12 @@ function matchesCondition(
 
 /**
  * Look up a single doc inside a transaction, mirroring the non-tx
- * findOne/update path. Special-cases `id eq value` to use `col.doc(id)`
- * because Firestore document IDs are metadata, not fields — they can't
- * be queried with `.where("id", ...)`. Returns undefined when nothing
- * matches.
+ * findOne/update path. An `id eq value` condition resolves through
+ * `col.doc(id)` because Firestore document IDs are metadata, not fields —
+ * they can't be queried with `.where("id", ...)` — and any remaining
+ * conditions are checked in memory (better-auth pairs `id` with an
+ * ownership or status clause, e.g. when it consumes a device code).
+ * Returns undefined when nothing matches.
  */
 async function lookupTxDoc(
 	transaction: Transaction,
@@ -646,15 +648,19 @@ async function lookupTxDoc(
 	where: WhereCondition[] | undefined,
 	mapper: FieldMapper,
 ): Promise<FirebaseFirestore.DocumentSnapshot | undefined> {
-	if (
-		where &&
-		where.length === 1 &&
-		where[0]?.field === "id" &&
-		(where[0]?.operator === "eq" || !where[0]?.operator)
-	) {
-		const docRef = col.doc(where[0].value as string);
-		const snap = await transaction.get(docRef);
-		return snap.exists ? snap : undefined;
+	const { id, rest } = splitIdEqCondition(where);
+	if (id !== undefined) {
+		const snap = await transaction.get(col.doc(id));
+		if (!snap.exists) return undefined;
+		if (
+			rest &&
+			!matchesWhere(
+				{ id: snap.id, ...dbDataToAppData(snap.data() ?? {}, mapper) },
+				rest,
+			)
+		)
+			return undefined;
+		return snap;
 	}
 	for (const whereClause of getChunkedWhereClauses(where)) {
 		const q = applyWhereClause(col, whereClause, mapper);
@@ -669,8 +675,7 @@ async function lookupTxDoc(
  *
  * Firestore document IDs are metadata, not fields, so `where("id", "==", …)`
  * silently matches nothing. Callers must resolve the doc by ref and evaluate
- * the remaining conditions themselves — see `lookupTxDoc` for the
- * single-condition version of the same problem.
+ * the remaining conditions themselves, as `lookupTxDoc` does.
  */
 function splitIdEqCondition(where: WhereCondition[] | undefined): {
 	id?: string;
@@ -1402,14 +1407,11 @@ export const firestoreAdapter: (
 						update as Record<string, any>,
 					);
 
-					// Special case: if where clause is just "id eq value", use doc() instead of query
-					if (
-						where &&
-						where.length === 1 &&
-						where[0]?.field === "id" &&
-						(where[0]?.operator === "eq" || !where[0]?.operator)
-					) {
-						const docId = where[0].value as string;
+					// `id` is document metadata, not a field: resolve by ref and check
+					// any remaining conditions in memory before writing.
+					const { id: idFilter, rest: restWhere } = splitIdEqCondition(where);
+					if (idFilter !== undefined) {
+						const docId = idFilter;
 						const docRef = col.doc(docId);
 						if (debugLogs) {
 							console.log(`[Firestore Adapter] UPDATE ${model}:`, {
@@ -1427,6 +1429,14 @@ export const firestoreAdapter: (
 							}
 							return null as any;
 						}
+						if (
+							restWhere &&
+							!matchesWhere(
+								{ id: doc.id, ...dbDataToAppData(doc.data() ?? {}, mapper) },
+								restWhere,
+							)
+						)
+							return null as any;
 
 						const { docData: updateData } = buildFirestoreWriteData(
 							normalizedUpdate as Record<string, any>,
@@ -1552,14 +1562,11 @@ export const firestoreAdapter: (
 				delete: async ({ model, where }) => {
 					const col = getCollectionRef(db, model, collections);
 
-					// Special case: if where clause is just "id eq value", use doc() instead of query
-					if (
-						where &&
-						where.length === 1 &&
-						where[0]?.field === "id" &&
-						(where[0]?.operator === "eq" || !where[0]?.operator)
-					) {
-						const docId = where[0].value as string;
+					// `id` is document metadata, not a field: resolve by ref and check
+					// any remaining conditions in memory before deleting.
+					const { id: idFilter, rest: restWhere } = splitIdEqCondition(where);
+					if (idFilter !== undefined) {
+						const docId = idFilter;
 						const docRef = col.doc(docId);
 						if (debugLogs) {
 							console.log(`[Firestore Adapter] DELETE ${model}:`, {
@@ -1568,7 +1575,14 @@ export const firestoreAdapter: (
 							});
 						}
 						const doc = await docRef.get();
-						if (doc && doc.exists) {
+						if (
+							doc.exists &&
+							(!restWhere ||
+								matchesWhere(
+									{ id: doc.id, ...dbDataToAppData(doc.data() ?? {}, mapper) },
+									restWhere,
+								))
+						) {
 							await docRef.delete();
 						}
 						return;
@@ -1585,6 +1599,25 @@ export const firestoreAdapter: (
 				},
 				deleteMany: async ({ model, where }) => {
 					const col = getCollectionRef(db, model, collections);
+
+					// Same metadata-not-a-field constraint as `updateMany`: an `id`
+					// condition resolves to a doc ref, the rest is checked in memory.
+					const { id: idFilter, rest: restWhere } = splitIdEqCondition(where);
+					if (idFilter !== undefined) {
+						const snap = await col.doc(idFilter).get();
+						if (!snap.exists) return 0;
+						if (
+							restWhere &&
+							!matchesWhere(
+								{ id: snap.id, ...dbDataToAppData(snap.data() ?? {}, mapper) },
+								restWhere,
+							)
+						)
+							return 0;
+						await snap.ref.delete();
+						return 1;
+					}
+
 					// Firestore's `IN` operator caps at 30 values. If a single where
 					// clause carries more than 30 values, split into sub-queries and
 					// sum the deletes so callers (e.g. better-auth's multi-session
@@ -1704,15 +1737,12 @@ export const firestoreAdapter: (
 				findOne: async ({ model, where, select }) => {
 					const col = getCollectionRef(db, model, collections);
 
-					// Special case: if where clause is just "id eq value", use doc() instead of query
-					// Firestore document IDs are metadata, not fields, so we can't query them with .where()
-					if (
-						where &&
-						where.length === 1 &&
-						where[0]?.field === "id" &&
-						(where[0]?.operator === "eq" || !where[0]?.operator)
-					) {
-						const docId = where[0].value as string;
+					// Firestore document IDs are metadata, not fields, so an `id`
+					// equality can't go through `.where()`: resolve the doc by ref and
+					// check any remaining conditions in memory.
+					const { id: idFilter, rest: restWhere } = splitIdEqCondition(where);
+					if (idFilter !== undefined) {
+						const docId = idFilter;
 						const docRef = col.doc(docId);
 						if (debugLogs) {
 							console.log(`[Firestore Adapter] FINDONE ${model}:`, {
@@ -1769,6 +1799,8 @@ export const firestoreAdapter: (
 								);
 							}
 						}
+						if (restWhere && !matchesWhere(result, restWhere))
+							return null as any;
 
 						if (debugLogs) {
 							console.log(
@@ -1951,14 +1983,11 @@ export const firestoreAdapter: (
 								// Apply additional filtering for other conditions if any
 								const otherConditions = where.filter((w) => w.field !== "id");
 								if (otherConditions.length > 0) {
-									results = results.filter((r: any) => {
-										return otherConditions.every((cond) => {
-											const value = r[cond.field];
-											const condOp = (cond.operator || "eq") as string;
-											if (condOp === "eq") return value === cond.value;
-											return true;
-										});
-									});
+									// Every operator, in memory — not just `eq`: a range on
+									// `expiresAt` used to be ignored here.
+									results = results.filter((r: any) =>
+										matchesWhere(r, otherConditions),
+									);
 								}
 
 								// Apply sorting if needed
@@ -2009,14 +2038,11 @@ export const firestoreAdapter: (
 								// Apply other conditions
 								const otherConditions = where.filter((w) => w.field !== "id");
 								if (otherConditions.length > 0) {
-									results = results.filter((r: any) => {
-										return otherConditions.every((cond) => {
-											const value = r[cond.field];
-											const condOp = (cond.operator || "eq") as string;
-											if (condOp === "eq") return value === cond.value;
-											return true;
-										});
-									});
+									// Every operator, in memory — not just `eq`: a range on
+									// `expiresAt` used to be ignored here.
+									results = results.filter((r: any) =>
+										matchesWhere(r, otherConditions),
+									);
 								}
 
 								// Apply sorting
@@ -2038,8 +2064,9 @@ export const firestoreAdapter: (
 								return results as any[];
 							}
 
-							// Handle single ID "eq" - return array with single doc
-							if ((op === "eq" || !op) && where.length === 1) {
+							// Handle ID "eq" - return an array with at most one doc, with any
+							// remaining conditions checked in memory
+							if (op === "eq" || !op) {
 								const docId = idCondition.value as string;
 								const doc = await col.doc(docId).get();
 								if (doc.exists) {
@@ -2049,7 +2076,10 @@ export const firestoreAdapter: (
 										for (const [k, v] of Object.entries(data)) {
 											result[mapper.fromDb(k)] = convertTimestamp(v);
 										}
-										return [result];
+										const otherConditions = where.filter(
+											(w) => w !== idCondition,
+										);
+										if (matchesWhere(result, otherConditions)) return [result];
 									}
 								}
 								return [];
@@ -2394,16 +2424,19 @@ export const firestoreAdapter: (
 								).filter((id): id is string => typeof id === "string");
 								const docPromises = ids.map((id) => col.doc(id).get());
 								const docs = await Promise.all(docPromises);
-								let count = docs.filter((doc) => doc.exists).length;
-
-								// Apply other conditions if any
+								// Remaining conditions are checked in memory.
 								const otherConditions = where.filter((w) => w.field !== "id");
-								if (otherConditions.length > 0) {
-									// For ID queries, we'd need to check other conditions manually
-									// This is a simplified version - full implementation might need more logic
-									return count;
-								}
-								return count;
+								return docs.filter(
+									(doc) =>
+										doc.exists &&
+										matchesWhere(
+											{
+												id: doc.id,
+												...dbDataToAppData(doc.data() ?? {}, mapper),
+											},
+											otherConditions,
+										),
+								).length;
 							}
 
 							// Handle "notIn" operator with IDs
@@ -2418,11 +2451,17 @@ export const firestoreAdapter: (
 									.length;
 							}
 
-							// Handle single ID "eq"
-							if ((op === "eq" || !op) && where.length === 1) {
-								const docId = idCondition.value as string;
-								const doc = await col.doc(docId).get();
-								return doc.exists ? 1 : 0;
+							// Handle ID "eq", with any remaining conditions checked in memory
+							if (op === "eq" || !op) {
+								const doc = await col.doc(idCondition.value as string).get();
+								if (!doc.exists) return 0;
+								const otherConditions = where.filter((w) => w !== idCondition);
+								return matchesWhere(
+									{ id: doc.id, ...dbDataToAppData(doc.data() ?? {}, mapper) },
+									otherConditions,
+								)
+									? 1
+									: 0;
 							}
 						}
 					}
