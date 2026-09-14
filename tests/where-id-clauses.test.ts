@@ -260,4 +260,42 @@ describe("where clauses that combine `id` with other conditions", () => {
 			}),
 		).toBeNull();
 	});
+
+	// The first clause has nothing to connect to, so its connector is
+	// meaningless. It used to be dropped along with every other OR clause,
+	// leaving a filter-less query that returned an arbitrary document.
+	it("a where clause made only of OR-connected conditions never matches everything", async () => {
+		const ctx = await auth.$context;
+		await auth.api.signUpEmail({
+			body: {
+				email: "victim@example.com",
+				password: "password1234",
+				name: "V",
+			},
+		});
+		const orWhere = (email: string) => [
+			{ field: "email", value: email, connector: "OR" as const },
+			{ field: "name", value: "nobody", connector: "OR" as const },
+		];
+		expect(
+			await ctx.adapter.findOne({
+				model: "user",
+				where: orWhere("nobody@example.com"),
+			}),
+		).toBeNull();
+		expect(
+			await ctx.adapter.count({
+				model: "user",
+				where: orWhere("nobody@example.com"),
+			}),
+		).toBe(0);
+		expect(
+			(
+				await ctx.adapter.findOne<{ email: string }>({
+					model: "user",
+					where: orWhere("victim@example.com"),
+				})
+			)?.email,
+		).toBe("victim@example.com");
+	});
 });

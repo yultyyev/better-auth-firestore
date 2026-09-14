@@ -189,8 +189,14 @@ function applyWhereClause(
 		return applyOperator(query, fieldName, op, w.value);
 	}
 
+	// The first clause has nothing to connect to, so its connector carries no
+	// meaning (every other adapter ignores it). Skipping it would leave a list
+	// of `OR`-connected clauses with no filter at all — a query that matches
+	// every document. Later `OR` clauses are still left out here, so the
+	// methods that go through this helper return a subset of the intended
+	// rows, never a superset.
 	const andConditions = where.filter(
-		(w) => w.connector === "AND" || !w.connector,
+		(w, i) => i === 0 || w.connector === "AND" || !w.connector,
 	);
 	// Filter out operators that need client-side processing (they'll be handled later)
 	const firestoreConditions = andConditions.filter((w) => {
