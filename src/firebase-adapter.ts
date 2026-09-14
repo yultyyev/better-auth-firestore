@@ -345,10 +345,13 @@ function buildFirestoreWriteData(
 // observes its own writes (transactional read-your-writes semantics).
 //
 // Operations also merge in place: `create` + `update` on the same ref
-// collapses to a single `set` at flush time, and `update` + `update`
-// collapses to a single merged `update`. The buffer is constructed inside
-// `runTransaction`, so Firestore's automatic retries on contention get a
-// fresh buffer each pass.
+// collapses to a single `create` at flush time, and `update` + `update`
+// collapses to a single merged `update`. A create is flushed with
+// `transaction.create`, which fails when the document already exists —
+// better-auth's create is an INSERT, and its first-writer-wins reservations
+// depend on a duplicate id failing (see the non-tx `create`). The buffer is
+// constructed inside `runTransaction`, so Firestore's automatic retries on
+// contention get a fresh buffer each pass.
 //
 // Read overlay is best-effort: `matchesWhere` covers the operators
 // better-auth uses inside transactions (eq, ne, in, notIn, gt(e), lt(e),
@@ -372,6 +375,12 @@ interface TxBufferWriteEntry {
 	 * canonical app-side field names. Used to overlay subsequent reads.
 	 */
 	appData: Record<string, any>;
+	/**
+	 * A create staged over a delete of the same ref in this transaction. The
+	 * document still exists in Firestore until the flush, so it has to be
+	 * replaced with `set` rather than inserted with `create`.
+	 */
+	replacesExisting?: boolean;
 }
 
 interface TxBufferDeleteEntry {
@@ -398,6 +407,7 @@ class TxBuffer {
 			ref,
 			docData: { ...docData },
 			appData: { ...appNormalized, id: ref.id },
+			replacesExisting: this.byPath.get(ref.path)?.op === "delete",
 		};
 		this.byPath.set(ref.path, entry);
 		return entry;
@@ -470,8 +480,10 @@ class TxBuffer {
 	/** Replay every staged write onto the transaction in insertion order. */
 	flush(transaction: Transaction): void {
 		for (const entry of this.byPath.values()) {
-			if (entry.op === "create") transaction.set(entry.ref, entry.docData);
-			else if (entry.op === "update")
+			if (entry.op === "create") {
+				if (entry.replacesExisting) transaction.set(entry.ref, entry.docData);
+				else transaction.create(entry.ref, entry.docData);
+			} else if (entry.op === "update")
 				transaction.update(entry.ref, entry.docData);
 			else transaction.delete(entry.ref);
 		}
@@ -1296,7 +1308,14 @@ export const firestoreAdapter: (
 							docId: ref.id,
 						});
 					}
-					await ref.set(docData);
+					// `create`, not `set`: an existing document must make the insert
+					// fail, as it does in every SQL adapter and in MongoDB. better-auth's
+					// first-writer-wins reservations (`reserveVerificationValue`: SAML
+					// assertion and DPoP proof replay protection, the SIWE email claim,
+					// the 1.7 unverified-account cleanup lock) create with a
+					// deterministic id and treat a duplicate-id failure as "someone else
+					// got there first"; `set` let every caller win.
+					await ref.create(docData);
 					const created = await ref.get();
 					if (debugLogs) {
 						console.log(
