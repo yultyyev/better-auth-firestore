@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
 	type AdapterFactoryConfig,
 	type AdapterFactoryOptions,
@@ -12,6 +13,9 @@ import { initFirestore } from "./firestore.js";
 import type { FirestoreAdapterConfig, NamingStrategy } from "./types.js";
 
 type CollectionsOverride = NonNullable<FirestoreAdapterConfig["collections"]>;
+
+/** The better-auth schema handed to the adapter creator by the factory. */
+type AdapterSchema = Parameters<AdapterFactoryOptions["adapter"]>[0]["schema"];
 
 type FieldMapper = {
 	toDb: (field: string) => string;
@@ -331,6 +335,30 @@ function buildFirestoreWriteData(
 		docData[mapper.toDb(k)] = v;
 	}
 	return { docData, idOverride };
+}
+
+/**
+ * Firestore enforces no unique constraints, but better-auth's database-backed
+ * rate limiter relies on `rateLimit.key` being unique: it inserts a row for a
+ * key it has not seen and treats a duplicate-key failure as "another request
+ * created it — re-read and increment". Without the constraint, a burst of
+ * concurrent first requests creates one row per request, each with its own
+ * budget, and the limit is multiplied by the size of the burst. Keying that
+ * model's documents by a hash of `key` and inserting with `create()` (which
+ * fails on an existing document) restores the constraint. The rate limiter
+ * never looks the row up by id.
+ */
+function uniqueKeyDocId(
+	schema: AdapterSchema | undefined,
+	model: string,
+	docData: Record<string, any>,
+	mapper: FieldMapper,
+): string | undefined {
+	const rateLimit = schema?.rateLimit;
+	if (!rateLimit || rateLimit.modelName !== model) return undefined;
+	const key = docData[mapper.toDb(rateLimit.fields.key?.fieldName ?? "key")];
+	if (typeof key !== "string" || key === "") return undefined;
+	return createHash("sha256").update(key).digest("hex");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -899,6 +927,7 @@ export const firestoreAdapter: (
 	const createTransactionAdapter = (
 		transaction: Transaction,
 		buffer: TxBuffer,
+		schema: AdapterSchema | undefined,
 	): CustomAdapter => {
 		// Subset of the non-tx `findMany` path: no OR-split queries or
 		// direct `id` lookups. better-auth's tx callbacks (e.g.
@@ -966,7 +995,12 @@ export const firestoreAdapter: (
 					normalizedData,
 					mapper,
 				);
-				const ref = idOverride ? col.doc(idOverride) : col.doc();
+				const uniqueId = uniqueKeyDocId(schema, model, docData, mapper);
+				const ref = uniqueId
+					? col.doc(uniqueId)
+					: idOverride
+						? col.doc(idOverride)
+						: col.doc();
 				const entry = buffer.stageCreate(model, ref, docData, normalizedData);
 				return { ...entry.appData };
 			},
@@ -1286,7 +1320,7 @@ export const firestoreAdapter: (
 	// the factory options. `config` is assembled per instance below so that
 	// `transaction` can close over that instance's better-auth options.
 	const customAdapter = {
-		adapter: () => {
+		adapter: ({ schema }) => {
 			return {
 				create: async ({ model, data }) => {
 					const col = getCollectionRef(db, model, collections);
@@ -1298,7 +1332,12 @@ export const firestoreAdapter: (
 						normalizedData,
 						mapper,
 					);
-					const ref = idOverride ? col.doc(idOverride) : col.doc();
+					const uniqueId = uniqueKeyDocId(schema, model, docData, mapper);
+					const ref = uniqueId
+						? col.doc(uniqueId)
+						: idOverride
+							? col.doc(idOverride)
+							: col.doc();
 					if (debugLogs) {
 						console.log(`[Firestore Adapter] CREATE ${model}:`, {
 							input: data,
@@ -2468,7 +2507,8 @@ export const firestoreAdapter: (
 						const buffer = new TxBuffer();
 						const txAdapter = createAdapterFactory({
 							config: { ...factoryConfig, transaction: false },
-							adapter: () => createTransactionAdapter(transaction, buffer),
+							adapter: ({ schema }) =>
+								createTransactionAdapter(transaction, buffer, schema),
 						})(options);
 						const result = await run(txAdapter);
 						buffer.flush(transaction);

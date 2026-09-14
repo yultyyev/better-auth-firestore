@@ -8,7 +8,10 @@ import { initFirestore } from "../src/firestore";
 // Firestore's `set()` silently replaces the document instead, which turned
 // every first-writer-wins reservation (`reserveVerificationValue` — SAML
 // assertion and DPoP proof replay protection, the SIWE email claim, the 1.7
-// unverified-account cleanup lock) into "everyone wins".
+// unverified-account cleanup lock) into "everyone wins". Firestore also has
+// no unique constraints, which the database-backed rate limiter relies on for
+// `rateLimit.key`; the adapter restores that one by keying the model's
+// documents by the key.
 
 const COLLECTIONS = {
 	users: "cu_users",
@@ -151,4 +154,38 @@ describe("create is an insert, not an upsert", () => {
 			.get();
 		expect(doc.data()?.value).toBe("second");
 	});
+
+	// The limiter reads the row for a key, creates one when it is missing and
+	// treats a duplicate-key failure as "another request created it — re-read
+	// and increment". Without a unique `key`, a burst of concurrent first
+	// requests created one row per request, each with its own budget: 12
+	// requests against `max: 3` were all allowed, and the next 24 as well.
+	it("database rate limiting keeps one row per key under a concurrent first burst", async () => {
+		const email = `rl-${Date.now()}@example.com`;
+		await auth.api.signUpEmail({
+			body: { email, password: "password1234", name: "Rate Limited" },
+		});
+		const request = () =>
+			new Request("http://localhost/api/auth/sign-in/email", {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					"x-forwarded-for": "203.0.113.77",
+				},
+				body: JSON.stringify({ email, password: "wrong-password" }),
+			});
+
+		const burst = await Promise.all(
+			Array.from({ length: 12 }, () => auth.handler(request())),
+		);
+		let allowed = burst.filter((r) => r.status !== 429).length;
+		for (let i = 0; i < 5; i++) {
+			if ((await auth.handler(request())).status !== 429) allowed++;
+		}
+
+		const rows = await db.collection(RATE_LIMIT_COLLECTION).get();
+		expect(rows.size).toBe(1);
+		expect(allowed).toBeLessThanOrEqual(MAX_ATTEMPTS);
+		expect(allowed).toBeGreaterThan(0);
+	}, 30_000);
 });
