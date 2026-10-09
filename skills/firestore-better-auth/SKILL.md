@@ -105,7 +105,7 @@ No composite index is required. The adapter never combines a `where` filter with
 
 Better Auth 1.7 needs adapter **v1.3+** (it made `incrementOne` a required adapter method; older adapters throw `Adapter "firestore" must implement incrementOne for atomic guarded counter updates` on rate limiting, organization invitations, device authorization, and two-factor). v1.3 also works with Better Auth 1.6, so upgrade the adapter first.
 
-1.7 identifies accounts by `(issuer, accountId)` and stores `issuer` on every account. Existing Firestore documents don't have it, and Firestore has no `npx auth migrate` — **existing users cannot sign in after upgrading until the field is backfilled**:
+Better Auth 1.7.3+ identifies accounts by `(providerId, accountId)`, as 1.6 did, and needs no data migration, so upgrade straight to it. Only 1.7.0–1.7.2 identify accounts by `(issuer, accountId)` and store `issuer` on every account. Existing Firestore documents don't have it, and Firestore has no `npx auth migrate`, so **on those releases existing users cannot sign in until the field is backfilled**:
 
 ```bash
 # Same credentials as the app (GOOGLE_APPLICATION_CREDENTIALS, FIREBASE_* vars, or --service-account key.json)
@@ -123,7 +123,7 @@ npx better-auth-firestore backfill-account-issuers --apply    # write, with auth
 
 Programmatic equivalent: `backfillAccountIssuers({ firestore, dryRun, issuers, resolveIssuer })`. The adapter also warns once at startup (`[better-auth-firestore] … Run: npx better-auth-firestore backfill-account-issuers …`) when account documents lack `issuer`; `migrationChecks: false` disables the check.
 
-Run the backfill before the first deploy on Better Auth 1.7 (the helper ships in v1.3 and is harmless on 1.6). Full details: https://better-auth.com/docs/guides/1-7-upgrade-guide
+Run the backfill before the first deploy on Better Auth 1.7.0–1.7.2 (the helper ships in v1.3 and is harmless on 1.6 and 1.7.3+). Full details: https://better-auth.com/docs/guides/1-7-upgrade-guide
 
 ---
 
@@ -216,7 +216,7 @@ No credentials or service account needed when using the emulator.
 - **`The query requires an index` on verification tokens** — You're on a version older than v1.1. Upgrade `better-auth-firestore`; the adapter now sorts filtered queries in memory and needs no composite index.
 - **`The query requires an index` on `rateLimit`** — You're on a version older than v1.3. Upgrade; the native `incrementOne` needs no composite index. Do not create the index.
 - **`Adapter "firestore" must implement incrementOne`** — Better Auth 1.7 with an adapter older than v1.3. Upgrade `better-auth-firestore`.
-- **Existing users can't sign in after moving to Better Auth 1.7** — The `account.issuer` backfill was not run (the server log shows a `[better-auth-firestore]` warning with the command). Run `npx better-auth-firestore backfill-account-issuers --apply` (see above).
+- **Existing users can't sign in after moving to Better Auth 1.7.0–1.7.2** — The `account.issuer` backfill was not run (the server log shows a `[better-auth-firestore]` warning with the command). Upgrade Better Auth to 1.7.3+, or run `npx better-auth-firestore backfill-account-issuers --apply` (see above).
 - **Only the social users can't sign in, and the backfill reports nothing to do** — You ran the backfill on adapter v1.3.0, which stamped `local:oauth:google` instead of `https://accounts.google.com` (same for `apple`/`facebook`/`line`). The field is present but wrong, so the startup warning stays silent. Upgrade the adapter and re-run `backfill-account-issuers --apply`; it repairs those documents.
 - **FIREBASE_PRIVATE_KEY with literal `\n`** — Always call `.replace(/\\n/g, "\n")` on the key before passing to `cert()`.
 - **Using at edge runtime** — Firebase Admin SDK does not run on Vercel Edge or Cloudflare Workers. Use Node.js runtimes only.
