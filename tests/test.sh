@@ -7,7 +7,7 @@ docker run -d --rm \
   --name ${CONTAINER_NAME} \
   -p 8080:8080 \
   -v "$(pwd)/tests/firestore.rules":/firestore.rules \
-  google/cloud-sdk:emulators gcloud beta emulators firestore start \
+  gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators gcloud beta emulators firestore start \
   --host-port=0.0.0.0:8080 \
   --rules=/firestore.rules
 
