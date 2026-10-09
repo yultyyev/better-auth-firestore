@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
 import { betterAuth } from "better-auth";
+import { getAuthTables } from "better-auth/db";
 import { FieldValue, type Firestore } from "firebase-admin/firestore";
 import {
 	backfillAccountIssuers,
@@ -13,16 +13,11 @@ import { initFirestore } from "../src/firestore";
 // written by earlier versions have no `issuer`, and Firestore has no
 // `auth migrate`, so `backfillAccountIssuers` is the upgrade path.
 
-const BETTER_AUTH_VERSION = JSON.parse(
-	readFileSync(
-		new URL("../node_modules/better-auth/package.json", import.meta.url),
-		"utf8",
-	),
-).version as string;
-const [major, minor] = BETTER_AUTH_VERSION.split(".").map(Number);
-// `issuer` is only consulted by lookups from 1.7 onwards; on 1.6 a legacy
-// document signs in regardless.
-const LOOKUPS_REQUIRE_ISSUER = major > 1 || (major === 1 && minor >= 7);
+// `issuer` is only consulted by lookups on Better Auth 1.7.0–1.7.2, the
+// releases whose account schema has it; on 1.6 and 1.7.3+ a legacy document
+// signs in regardless.
+const LOOKUPS_REQUIRE_ISSUER =
+	getAuthTables({}).account.fields.issuer !== undefined;
 
 async function clearCollection(db: Firestore, name: string) {
 	const snap = await db.collection(name).get();

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { getAuthTables } from "better-auth/db";
 import type { Firestore } from "firebase-admin/firestore";
 import type { MockInstance } from "vitest";
 import { firestoreAdapter } from "../src";
@@ -8,14 +8,10 @@ import { initFirestore } from "../src/firestore";
 // `account.issuer` but existing account documents lack it — the silent
 // "existing users can't sign in" failure after a 1.7 upgrade.
 
-const BETTER_AUTH_VERSION = JSON.parse(
-	readFileSync(
-		new URL("../node_modules/better-auth/package.json", import.meta.url),
-		"utf8",
-	),
-).version as string;
-const [major, minor] = BETTER_AUTH_VERSION.split(".").map(Number);
-const SCHEMA_HAS_ISSUER = major > 1 || (major === 1 && minor >= 7);
+// Only Better Auth 1.7.0–1.7.2 put `issuer` in the account schema; 1.7.3
+// went back to `(providerId, accountId)`. Read the installed schema, as the
+// adapter does, rather than inferring it from the version.
+const SCHEMA_HAS_ISSUER = getAuthTables({}).account.fields.issuer !== undefined;
 
 function collectionsFor(prefix: string) {
 	return {
