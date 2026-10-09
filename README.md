@@ -13,14 +13,14 @@
 - **AI skill:** [Cursor, Claude Code, Codex & 70+ agents](#ai-assistant-skill) — `npx skills add yultyyev/better-auth-firestore` • [llms.txt](./llms.txt)
 
 > [!IMPORTANT]
-> **Upgrading to Better Auth 1.7 with existing users?** 1.7 looks accounts up by a new `issuer` field that older documents don't have, so existing users can't sign in until it's backfilled. Before your first deploy on 1.7, run:
+> **Upgrading to Better Auth 1.7 with existing users?** Go straight to 1.7.3 or later: it identifies accounts by `(providerId, accountId)`, as 1.6 did, so no data migration is needed. Only 1.7.0–1.7.2 look accounts up by an `issuer` field that older documents don't have; if you deploy one of those, existing users can't sign in until it's backfilled:
 >
 > ```bash
 > npx better-auth-firestore backfill-account-issuers          # dry run — prints a report
 > npx better-auth-firestore backfill-account-issuers --apply  # writes
 > ```
 >
-> The adapter warns on startup while any account document is missing it. Details: [Upgrading to Better Auth 1.7](#upgrading-to-better-auth-17).
+> On 1.7.0–1.7.2 the adapter warns on startup while any account document is missing it. Details: [Upgrading to Better Auth 1.7](#upgrading-to-better-auth-17).
 
 ---
 
@@ -205,7 +205,7 @@ firestoreAdapter({
 
 | Better Auth | Status | Notes |
 |---|---|---|
-| `^1.7.0` | ✅ Recommended | Requires adapter v1.3+ (native `incrementOne`). Existing deployments must run the [account issuer backfill](#upgrading-to-better-auth-17) first. |
+| `^1.7.0` | ✅ Recommended | Requires adapter v1.3+ (native `incrementOne`). Use 1.7.3 or later; deployments on 1.7.0–1.7.2 must run the [account issuer backfill](#upgrading-to-better-auth-17) first. |
 | `^1.6.0` | ✅ Supported | Tested in CI alongside 1.7; the same adapter release works with both. |
 | `< 1.6` | ⚠️ Not covered by CI | Pin an older adapter release (≤ v1.2) if you need one. |
 
@@ -307,7 +307,9 @@ Better Auth 1.7 changed how accounts are identified and what it requires from da
 
 **1. Adapter v1.3+ is required.** 1.7 made `incrementOne` a mandatory adapter method and removed the fallback earlier versions relied on. With adapter ≤ v1.2 on Better Auth 1.7, sign-in still works but every feature built on atomic counters throws `Adapter "firestore" must implement incrementOne` — database-backed rate limiting, organization invitations and team seats, device authorization, and two-factor lockout. v1.3 implements it natively and also works with 1.6, so upgrade the adapter first, independently of Better Auth.
 
-**2. Existing account documents need an `issuer`.** 1.7 identifies an account by the pair `(issuer, accountId)` and stores `issuer` on every new account. Documents written by earlier versions don't have it, so after upgrading, 1.7 can't find them — **existing users can no longer sign in** until the field is backfilled. SQL users get this from `npx auth migrate`; Firestore has no migration runner, so the adapter ships the migration as one command. Run it with the same credentials your app uses (`GOOGLE_APPLICATION_CREDENTIALS`, the `FIREBASE_*` variables from [Environment Variables](#environment-variables), or `--service-account key.json`):
+**2. On 1.7.0–1.7.2 only, existing account documents need an `issuer`.** Better Auth 1.7.3 went back to identifying accounts by `(providerId, accountId)`, as 1.6 did, so on 1.7.3 or later there is nothing to migrate: upgrade straight to the latest 1.7 and skip this step. If you already backfilled, nothing needs undoing. The official guide's [cleanup for 1.7.0–1.7.2 databases](https://better-auth.com/docs/guides/1-7-upgrade-guide#account-identity-keeps-the-provider-key) relaxes a SQL `NOT NULL` column and unique index that Firestore never had, and 1.7.3+ ignores the extra field.
+
+1.7.0–1.7.2 identify an account by the pair `(issuer, accountId)` and store `issuer` on every new account. Documents written by earlier versions don't have it, so after upgrading, those releases can't find them — **existing users can no longer sign in** until the field is backfilled. SQL users get this from `npx auth migrate`; Firestore has no migration runner, so the adapter ships the migration as one command. Run it with the same credentials your app uses (`GOOGLE_APPLICATION_CREDENTIALS`, the `FIREBASE_*` variables from [Environment Variables](#environment-variables), or `--service-account key.json`):
 
 ```bash
 npx better-auth-firestore backfill-account-issuers            # dry run: prints the report, writes nothing
@@ -316,15 +318,15 @@ npx better-auth-firestore backfill-account-issuers --apply    # writes, with aut
 
 Add `--collection` / `--naming-strategy snake_case` if you customised the adapter, and `--issuer <providerId>=<url>` for a provider whose real issuer the backfill can't determine on its own — the built-in `cognito`, `paybin`, and `microsoft` (Entra ID) providers, and the fixed-id generic-OAuth helpers `okta`, `auth0`, `keycloak`, and `microsoft-entra-id`, whose issuer depends on how they're configured or on the live token. Those are reported as unresolved (exit status 1) until you supply one, rather than stamped with a value that may be wrong. `google`, `apple`, `facebook`, and `line` publish a fixed real issuer and resolve automatically; every other built-in social provider gets the synthetic `local:oauth:<providerId>` form 1.7 assigns when a provider has none of its own. (`slack` is ambiguous — the built-in social provider has no issuer, the generic-OAuth helper uses `https://slack.com`; it defaults to the synthetic form, so pass `--issuer slack=https://slack.com` if you use the helper.) `--help` lists everything.
 
-> **Already ran this on adapter v1.3.0?** That release stamped `local:oauth:google` instead of the real `https://accounts.google.com` (and likewise for `apple`, `facebook`, and `line`), so those users still can't sign in even though the field is set — and because the field *is* set, the startup warning stays silent and a re-run of the old command reported nothing to do. Upgrade the adapter and run the backfill again: it detects that exact wrong value, repairs it, and lists the affected documents as `wrong issuers left by the v1.3.0 backfill`. Deliberate issuers you supplied yourself are never touched. Users who signed in while the issuer was wrong already self-healed — Better Auth linked a fresh, correctly stamped account to their email — which leaves the v1.3.0 row behind as a stale twin. Those are reported separately as superseded and deliberately left alone, because re-stamping them would create a duplicate `(issuer, accountId)`; they're inert (1.7 never looks the old issuer up) and deleting them is optional.
+> **Already ran this on adapter v1.3.0?** That release stamped `local:oauth:google` instead of the real `https://accounts.google.com` (and likewise for `apple`, `facebook`, and `line`), so those users still can't sign in even though the field is set — and because the field *is* set, the startup warning stays silent and a re-run of the old command reported nothing to do. Upgrade the adapter and run the backfill again: it detects that exact wrong value, repairs it, and lists the affected documents as `wrong issuers left by the v1.3.0 backfill`. Deliberate issuers you supplied yourself are never touched. Users who signed in while the issuer was wrong already self-healed — Better Auth linked a fresh, correctly stamped account to their email — which leaves the v1.3.0 row behind as a stale twin. Those are reported separately as superseded and deliberately left alone, because re-stamping them would create a duplicate `(issuer, accountId)`; they're inert on 1.7.0–1.7.2 (which never look the old issuer up), but on 1.7.3+ they share their twin's `(providerId, accountId)`, so delete them when you move to 1.7.3 or later.
 
 The command mirrors 1.7's own rules: `credential` → `local:credential` (and repairs `accountId` to equal `userId`), `siwe` → `local:siwe`, `google`/`apple`/`facebook`/`line` → their real issuer, and every other provider without one of its own → `local:oauth:<encodeURIComponent(providerId)>`. It refuses to guess for providers with a real issuer it can't determine offline — those come back unresolved until you pass `--issuer`. It is idempotent (stamped documents are skipped, apart from the v1.3.0 values noted above, which are repaired), paginates, and exits with status 1 when it finds `(issuer, accountId)` collisions or documents it cannot resolve — 1.7 treats that pair as unique, so resolve those by hand before deploying. The same logic is available programmatically as `backfillAccountIssuers({ firestore, dryRun, issuers, resolveIssuer, … })`.
 
 **If you forget:** the adapter checks on startup and logs a `[better-auth-firestore]` warning with the exact command whenever Better Auth expects `issuer` but account documents lack it (two aggregation reads per process; `migrationChecks: false` disables it).
 
-Run the backfill (dry run, then real) before your first deploy on Better Auth 1.7; it ships in v1.3 and is harmless on 1.6. Once you're on v1.3 you can also delete the `rateLimit` composite indexes; see [Firestore Index](#3-firestore-index-optional).
+Run the backfill (dry run, then real) before your first deploy on Better Auth 1.7.0–1.7.2; it ships in v1.3 and is harmless on 1.6 and 1.7.3+. Once you're on v1.3 you can also delete the `rateLimit` composite indexes; see [Firestore Index](#3-firestore-index-optional).
 
-> **Plugin authors:** 1.7 removed `internalAdapter.findOAuthUser(email, accountId, providerId)`. Use `findAccountOwnerByKey({ issuer, accountId })` and pass `issuer` to `linkAccount` / `createOAuthUser`. If you use [`better-auth-firebase-auth`](https://github.com/yultyyev/better-auth-firebase-auth), upgrade it to [v2.2.0 or later](https://github.com/yultyyev/better-auth-firebase-auth/releases/tag/v2.2.0) — earlier releases call the removed API and every sign-in fails on 1.7 (one build supports Better Auth 1.5–1.7; [v2.2.1](https://github.com/yultyyev/better-auth-firebase-auth/releases/tag/v2.2.1) adds `npx better-auth-firebase-auth backfill-account-issuers`). Its `providerId: "firebase"` account documents are already covered by the backfill above: the default rule stamps them `local:oauth:firebase`, exactly the issuer that plugin uses.
+> **Plugin authors:** 1.7 removed `internalAdapter.findOAuthUser(email, accountId, providerId)`. Use `findAccountOwnerByKey`, which takes `{ providerId, accountId }` on 1.7.3+ and `{ issuer, accountId }` on 1.7.0–1.7.2 (where `linkAccount` / `createOAuthUser` also need `issuer`). If you use [`better-auth-firebase-auth`](https://github.com/yultyyev/better-auth-firebase-auth), upgrade it to [v2.2.2 or later](https://github.com/yultyyev/better-auth-firebase-auth/releases/tag/v2.2.2) — earlier releases fail every sign-in on 1.7 (v2.2.0 and v2.2.1 handle only 1.7.0–1.7.2). One build supports Better Auth 1.5–1.7, and it ships `npx better-auth-firebase-auth backfill-account-issuers` for 1.7.0–1.7.2. Its `providerId: "firebase"` account documents are already covered by the backfill above: the default rule stamps them `local:oauth:firebase`, exactly the issuer that plugin uses.
 
 ## Migration from Auth.js/NextAuth
 
@@ -500,7 +502,7 @@ Note that Firestore emulators do **not** enforce composite indexes, so index fai
 
 **Symptom:** Sign-up works, but accounts created before the upgrade fail to sign in (email/password reports invalid credentials; social sign-in reports the account as not linked, or links a duplicate account to the email-matched user).
 
-**Fix:** Run `npx better-auth-firestore backfill-account-issuers --apply` once to stamp the `issuer` field 1.7 uses to look accounts up (dry run first without `--apply`). The adapter logs the same command at startup while documents are missing it. See [Upgrading to Better Auth 1.7](#upgrading-to-better-auth-17).
+**Fix:** Upgrade Better Auth to 1.7.3 or later, which looks accounts up by `(providerId, accountId)` again. To stay on 1.7.0–1.7.2, run `npx better-auth-firestore backfill-account-issuers --apply` once to stamp the `issuer` field those releases use to look accounts up (dry run first without `--apply`). The adapter logs the same command at startup while documents are missing it. See [Upgrading to Better Auth 1.7](#upgrading-to-better-auth-17).
 
 **If only your social users are affected and the backfill says there's nothing to do,** you ran it on adapter v1.3.0, which stamped `local:oauth:google` rather than the real `https://accounts.google.com` (same for `apple`, `facebook`, `line`). The field is present but wrong, so neither the startup warning nor the old command flags it. Upgrade the adapter and re-run the backfill — it repairs those documents. See [Upgrading to Better Auth 1.7](#upgrading-to-better-auth-17).
 
@@ -524,7 +526,7 @@ No. Better Auth's verification-token lookup filters by `identifier` and orders b
 
 ### Does the adapter support Better Auth 1.7?
 
-Yes, from v1.3. The same release also works with Better Auth 1.6 (both are tested in CI). If you have existing users, run the account issuer backfill before deploying 1.7 — see [Upgrading to Better Auth 1.7](#upgrading-to-better-auth-17).
+Yes, from v1.3. The same release also works with Better Auth 1.6 (both are tested in CI). 1.7.3 and later need no data migration; if you deploy 1.7.0–1.7.2 with existing users, run the account issuer backfill first — see [Upgrading to Better Auth 1.7](#upgrading-to-better-auth-17).
 
 ## AI Assistant Skill
 
