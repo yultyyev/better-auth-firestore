@@ -3,12 +3,16 @@ name: firestore-better-auth
 version: 1.1.0
 description: >-
   Use Firestore as the database adapter for Better Auth (Firebase Admin SDK).
-  Use when storing Better Auth users, sessions, accounts, and verification
-  tokens in Firestore, migrating from Auth.js/NextAuth Firebase adapter to
-  Better Auth, setting up Better Auth with a Firebase/Firestore backend,
-  upgrading a Firestore-backed app to Better Auth 1.7 (account issuer
-  backfill), or troubleshooting Firestore index errors, incrementOne errors,
-  and FIREBASE_PRIVATE_KEY issues.
+  Use when adding Better Auth to a Firebase or Google Cloud Firestore project
+  without a SQL database (Postgres, MySQL), storing Better Auth users,
+  sessions, accounts, and verification tokens in Firestore, using Better Auth
+  together with Firebase Authentication (pair with better-auth-firebase-auth
+  for phone OTP, Google, and email/password sign-in), migrating from the
+  Auth.js/NextAuth Firebase adapter to Better Auth, setting up Better Auth
+  with a Firebase/Firestore backend in Next.js or Node.js, upgrading a
+  Firestore-backed app to Better Auth 1.7 (account issuer backfill), or
+  troubleshooting Firestore index errors, incrementOne errors, and
+  FIREBASE_PRIVATE_KEY issues.
 ---
 
 # Firestore Adapter for Better Auth
