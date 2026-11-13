@@ -1,6 +1,6 @@
 # better-auth-firestore
 
-> Firestore database adapter for Better Auth using the Firebase Admin SDK — a drop-in replacement for the Auth.js Firebase adapter.
+> Use Firestore as the database for Better Auth: a Firebase Admin SDK adapter that keeps Better Auth data in your Firebase project, with no second database (Postgres, MySQL, MongoDB). A drop-in replacement for the Auth.js (NextAuth) Firebase adapter.
 
 Install: `pnpm add better-auth-firestore firebase-admin better-auth`
 
@@ -19,7 +19,7 @@ This package stores Better Auth users, sessions, accounts, and verification toke
 ## Package & ecosystem
 
 - [npm: better-auth-firestore](https://www.npmjs.com/package/better-auth-firestore): Published package
-- [skills.sh listing](https://skills.sh/yultyyev/better-auth-firestore): Agent skill directory (indexed after install telemetry)
+- [skills.sh skill page](https://skills.sh/yultyyev/better-auth-firestore/firestore-better-auth): The `firestore-better-auth` agent skill on skills.sh
 - [better-auth-firebase-auth](https://github.com/yultyyev/better-auth-firebase-auth): Sister plugin for Firebase Auth identity providers
 - [Better Auth docs](https://www.better-auth.com/docs): Framework documentation
 - [Better Auth adapter guide](https://www.better-auth.com/docs/guides/create-a-db-adapter): How database adapters work

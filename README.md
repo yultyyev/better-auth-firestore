@@ -5,12 +5,14 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![skills.sh](https://skills.sh/b/yultyyev/better-auth-firestore)](https://skills.sh/yultyyev/better-auth-firestore)
 
-**Firestore (Firebase Admin SDK) adapter for Better Auth.** A drop-in replacement for the Auth.js Firebase adapter with matching data shape.
+**Use Firestore as the database for [Better Auth](https://www.better-auth.com).** `better-auth-firestore` is a Better Auth database adapter that stores users, sessions, accounts and verification tokens in your Firebase project's Firestore through the Firebase Admin SDK, so a Firebase app can add Better Auth without running a second database such as Postgres, MySQL or MongoDB.
 
+- **Sign in with Firebase Authentication too:** pair it with [`better-auth-firebase-auth`](https://github.com/yultyyev/better-auth-firebase-auth) for phone (SMS) OTP, Google and email/password sign-in through Firebase. This package stores the data; that one signs users in. See [Use with Firebase Authentication](#use-with-firebase-authentication).
+- **Coming from Auth.js / NextAuth:** a drop-in replacement for the Auth.js Firebase adapter, with the same collection names and field shapes, so existing Firestore data needs no migration.
 - **Install:** `pnpm add better-auth-firestore firebase-admin better-auth`
 - **Docs:** [Quickstart](#quick-start) • [Options](#options) • [Better Auth 1.7 upgrade](#upgrading-to-better-auth-17) • [Migration](#migration-from-authjsnextauth) • [Emulator](#using-the-firestore-emulator)
 - **Example:** See [`/examples/minimal`](./examples/minimal) for a complete Next.js App Router example
-- **AI skill:** [Cursor, Claude Code, Codex & 70+ agents](#ai-assistant-skill) — `npx skills add yultyyev/better-auth-firestore` • [llms.txt](./llms.txt)
+- **AI skill:** [`firestore-better-auth` on skills.sh](https://skills.sh/yultyyev/better-auth-firestore/firestore-better-auth) for Cursor, Claude Code, Codex & 70+ agents — `npx skills add yultyyev/better-auth-firestore` • [llms.txt](./llms.txt)
 
 > [!IMPORTANT]
 > **Upgrading to Better Auth 1.7 with existing users?** Go straight to 1.7.3 or later: it identifies accounts by `(providerId, accountId)`, as 1.6 did, so no data migration is needed. Only 1.7.0–1.7.2 look accounts up by an `issuer` field that older documents don't have; if you deploy one of those, existing users can't sign in until it's backfilled:
@@ -24,7 +26,7 @@
 
 ---
 
-## Related: Firebase Auth Plugin
+## Use with Firebase Authentication
 
 For Firebase Authentication integration with Better Auth, see **[better-auth-firebase-auth](https://github.com/yultyyev/better-auth-firebase-auth)**. It provides:
 
@@ -508,6 +510,14 @@ Note that Firestore emulators do **not** enforce composite indexes, so index fai
 
 ## FAQ
 
+### Can I use Better Auth with Firebase?
+
+Yes. Better Auth needs a database for its users, sessions, accounts and verification tokens, and `better-auth-firestore` makes your Firebase project's Firestore that database. To sign users in through Firebase Authentication (phone OTP, Google, email/password), add [`better-auth-firebase-auth`](https://github.com/yultyyev/better-auth-firebase-auth) on top: the two are built to work together. See [Use with Firebase Authentication](#use-with-firebase-authentication) and the [Quick start](#quick-start).
+
+### Do I need Postgres or another SQL database to use Better Auth with Firestore?
+
+No. Every Better Auth model, including plugin models such as `rateLimit`, is stored as a Firestore collection, so Firestore is the only database. The adapter needs a server-side Node.js runtime for the Firebase Admin SDK; see [Which runtimes are supported?](#which-runtimes-are-supported).
+
 ### Can I migrate from Auth.js / NextAuth without changing existing Firestore data?
 
 Yes. `better-auth-firestore` is designed as a drop-in replacement for the Auth.js Firebase adapter with matching collection names and field shapes by default, so most projects do not need a Firestore data migration. See [Migration from Auth.js/NextAuth](#migration-from-authjsnextauth) for the adapter-specific details. The [AI Assistant Skill](#ai-assistant-skill) includes a migration guide for Cursor, Claude Code, and other agents.
@@ -532,7 +542,7 @@ Yes, from v1.3. The same release also works with Better Auth 1.6 (both are teste
 
 The agent skill lives at [`skills/firestore-better-auth/SKILL.md`](./skills/firestore-better-auth/SKILL.md). It works with Cursor, Claude Code, Codex, Copilot, Windsurf, and [70+ other agents](https://skills.sh) via the [skills.sh](https://skills.sh) ecosystem.
 
-The skill teaches AI assistants the correct setup, environment variable handling, and common gotchas. It also triggers when you ask about using Firestore with Better Auth, migrating from Auth.js/NextAuth, or troubleshooting `FIREBASE_PRIVATE_KEY` issues.
+The skill teaches AI assistants the correct setup, environment variable handling, and common gotchas. It also triggers when you ask about adding Better Auth to a Firebase app, using Firestore with Better Auth, pairing it with Firebase Authentication, migrating from Auth.js/NextAuth, or troubleshooting `FIREBASE_PRIVATE_KEY` issues.
 
 ```bash
 npx skills add yultyyev/better-auth-firestore
@@ -540,7 +550,7 @@ npx skills add yultyyev/better-auth-firestore
 
 For LLM crawlers and AI search, see also [`llms.txt`](./llms.txt) at the repo root — a curated index of documentation, the skill file, and key setup facts.
 
-Install works today from GitHub. The [skills.sh listing page](https://skills.sh/yultyyev/better-auth-firestore) and README badge appear once indexed — tracking [vercel-labs/skills#1601](https://github.com/vercel-labs/skills/issues/1601).
+Skill page: [skills.sh/yultyyev/better-auth-firestore/firestore-better-auth](https://skills.sh/yultyyev/better-auth-firestore/firestore-better-auth).
 
 ---
 
