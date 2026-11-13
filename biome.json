@@ -1,6 +1,6 @@
 {
   "root": true,
-  "$schema": "https://biomejs.dev/schemas/2.4.9/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.6.7/schema.json",
   "formatter": {
     "enabled": true,
     "indentStyle": "tab"
@@ -9,7 +9,7 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": false,
+      "preset": "none",
       "suspicious": {
         "noImplicitAnyLet": "warn",
         "noDuplicateObjectKeys": "warn",
