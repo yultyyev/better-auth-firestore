@@ -66,14 +66,15 @@ type WhereCondition = {
 	operator?: string;
 	value: any;
 	connector?: "AND" | "OR";
+	mode?: "sensitive" | "insensitive";
 };
 
 /**
  * Firestore caps the `IN` operator at 30 comparison values. When a `where`
  * clause passes more than this, queries throw with
  * `INVALID_ARGUMENT: 'IN' supports up to 30 comparison values.`
- * We split oversized IN values into chunks of this size in both `deleteMany`
- * and the regular `findMany` path and merge results.
+ * `queryServer` splits an oversized IN into chunks of this size and merges
+ * the results.
  * https://firebase.google.com/docs/firestore/query-data/queries#query_limitations
  */
 const FIRESTORE_IN_CHUNK_SIZE = 30;
@@ -173,53 +174,27 @@ function getCollectionRef(
 	return db.collection(model);
 }
 
-function applyWhereClause(
-	query: FirebaseFirestore.Query,
-	where?: WhereCondition[],
-	mapper?: ReturnType<typeof mapFieldsFactory>,
-): FirebaseFirestore.Query {
-	if (!where || where.length === 0) return query;
-	const mapperFn = mapper?.toDb || ((x: string) => x);
+const OPERATOR_ALIASES: Record<string, string> = {
+	"==": "eq",
+	"!=": "ne",
+	notIn: "not_in",
+	startsWith: "starts_with",
+	"starts-with": "starts_with",
+	endsWith: "ends_with",
+	"ends-with": "ends_with",
+	"array-contains": "contains",
+};
 
-	if (where.length === 1) {
-		const w = where[0];
-		if (!w) return query;
-		const fieldName = mapperFn(w.field);
-		const op = w.operator || "eq";
-		return applyOperator(query, fieldName, op, w.value);
-	}
-
-	// The first clause has nothing to connect to, so its connector carries no
-	// meaning (every other adapter ignores it). Skipping it would leave a list
-	// of `OR`-connected clauses with no filter at all — a query that matches
-	// every document. Later `OR` clauses are still left out here, so the
-	// methods that go through this helper return a subset of the intended
-	// rows, never a superset.
-	const andConditions = where.filter(
-		(w, i) => i === 0 || w.connector === "AND" || !w.connector,
-	);
-	// Filter out operators that need client-side processing (they'll be handled later)
-	const firestoreConditions = andConditions.filter((w) => {
-		const op = (w.operator || "eq") as string;
-		return (
-			op !== "notIn" &&
-			op !== "not_in" &&
-			op !== "endsWith" &&
-			op !== "ends-with" &&
-			op !== "ends_with" &&
-			op !== "contains"
-		);
-	});
-	let q = query;
-	for (const w of firestoreConditions) {
-		const fieldName = mapperFn(w.field);
-		const op = w.operator || "eq";
-		q = applyOperator(q, fieldName, op, w.value);
-	}
-
-	return q;
+/** A condition's operator in Better Auth's spelling (`eq` when omitted). */
+function operatorOf(cond: WhereCondition): string {
+	const op = cond.operator ?? "eq";
+	return OPERATOR_ALIASES[op] ?? op;
 }
 
+/**
+ * Adds one condition to a Firestore query. Only the operators `planGroup`
+ * hands to Firestore reach this; every other operator is evaluated in memory.
+ */
 function applyOperator(
 	query: FirebaseFirestore.Query,
 	field: string,
@@ -228,32 +203,13 @@ function applyOperator(
 ): FirebaseFirestore.Query {
 	switch (operator) {
 		case "eq":
-		case "==":
 			return query.where(field, "==", value);
-		case "ne":
-		case "!=":
-			return query.where(field, "!=", value);
 		case "in":
-			return query.where(field, "in", Array.isArray(value) ? value : [value]);
-		case "notIn":
-		case "not_in":
-			return query;
-		case "contains":
-		case "array-contains":
-			// Only use array-contains if we're sure it's an array field
-			// For string fields, we'll need client-side filtering
-			return query.where(field, "array-contains", value);
-		case "startsWith":
-		case "starts-with":
-		case "starts_with": {
+			return query.where(field, "in", value);
+		case "starts_with":
 			return query
 				.where(field, ">=", value)
 				.where(field, "<", value + "\uf8ff");
-		}
-		case "endsWith":
-		case "ends-with":
-		case "ends_with":
-			return query;
 		case "gt":
 			return query.where(field, ">", value);
 		case "gte":
@@ -263,7 +219,9 @@ function applyOperator(
 		case "lte":
 			return query.where(field, "<=", value);
 		default:
-			return query.where(field, "==", value);
+			throw new Error(
+				`[better-auth-firestore] operator "${operator}" is evaluated in memory, not by Firestore`,
+			);
 	}
 }
 
@@ -387,12 +345,12 @@ function uniqueKeyDocId(
 // constructed inside `runTransaction`, so Firestore's automatic retries on
 // contention get a fresh buffer each pass.
 //
-// Read overlay is best-effort: `matchesWhere` covers the operators
-// better-auth uses inside transactions (eq, ne, in, notIn, gt(e), lt(e),
-// contains, startsWith, endsWith, plus AND/OR connectors). Exotic
-// operators fall through to a real `transaction.get`, which won't see
-// buffered docs of the same model — in practice better-auth never
-// generates such clauses inside its tx callbacks.
+// Reads overlay the buffer (see `txMatches` in the transaction adapter):
+// staged creates are matched in memory with `matchesWhere`, documents read
+// from Firestore are replaced by their staged state and re-checked, and
+// staged deletes hide them. A staged update that makes a document match a
+// where clause its stored fields do not satisfy is not found — better-auth
+// never reads a row back by a field it changed in the same transaction.
 
 interface TxBufferWriteEntry {
 	op: "create" | "update";
@@ -478,16 +436,17 @@ class TxBuffer {
 		return entry;
 	}
 
-	/** First buffered create for `model` whose appData satisfies `where`. */
-	findCreateMatching(
+	/** Buffered creates for `model` whose appData satisfies `where`. */
+	createsMatching(
 		model: string,
 		where: WhereCondition[] | undefined,
-	): TxBufferWriteEntry | undefined {
+	): TxBufferWriteEntry[] {
+		const entries: TxBufferWriteEntry[] = [];
 		for (const entry of this.byPath.values()) {
 			if (entry.op !== "create" || entry.model !== model) continue;
-			if (matchesWhere(entry.appData, where)) return entry;
+			if (matchesWhere(entry.appData, where)) entries.push(entry);
 		}
-		return undefined;
+		return entries;
 	}
 
 	/** Stage a delete on `ref`, discarding any prior create/update for the same path. */
@@ -495,20 +454,9 @@ class TxBuffer {
 		this.byPath.set(ref.path, { op: "delete", model, ref });
 	}
 
-	/** True if `ref` has a delete staged. */
-	isDeleted(refPath: string): boolean {
-		const entry = this.byPath.get(refPath);
-		return !!entry && entry.op === "delete";
-	}
-
 	/** Buffered entry (create, update, or delete) for a specific ref path, if any. */
 	getByPath(refPath: string): TxBufferEntry | undefined {
 		return this.byPath.get(refPath);
-	}
-
-	/** All buffered entries, for scanning staged creates by model. */
-	values(): IterableIterator<TxBufferEntry> {
-		return this.byPath.values();
 	}
 
 	/** Replay every staged write onto the transaction in insertion order. */
@@ -544,10 +492,8 @@ function splitOrGroups(where: WhereCondition[]): WhereCondition[][] {
 }
 
 /**
- * Evaluates a where clause against an in-memory app-side doc. AND-within-
+ * Evaluates a where clause against an in-memory app-side row. AND-within-
  * group, OR-between-groups (a new group starts at every `connector: "OR"`).
- * Unknown operators fall back to equality — see TxBuffer header for the
- * supported set.
  */
 function matchesWhere(
 	appData: Record<string, any>,
@@ -568,6 +514,9 @@ function comparable(value: unknown): unknown {
 	return value instanceof Date ? value.getTime() : value;
 }
 
+const isNullish = (value: unknown): value is null | undefined =>
+	value === null || value === undefined;
+
 /**
  * Relational comparison with SQL/Firestore semantics: a missing or null
  * field never satisfies a range guard. Plain JS would coerce `null` to 0
@@ -578,8 +527,7 @@ function compareRelational(
 	right: unknown,
 	op: "gt" | "gte" | "lt" | "lte",
 ): boolean {
-	if (left === null || left === undefined) return false;
-	if (right === null || right === undefined) return false;
+	if (isNullish(left) || isNullish(right)) return false;
 	const a = comparable(left) as any;
 	const b = comparable(right) as any;
 	switch (op) {
@@ -594,106 +542,78 @@ function compareRelational(
 	}
 }
 
+/**
+ * Evaluates one condition against an app-side row, with the SQL null
+ * semantics Better Auth's adapter contract (and its conformance suite)
+ * expects:
+ *
+ * - A field the document does not have reads as null. The adapter never
+ *   writes `undefined`, so an optional field nobody set is missing, not null.
+ * - `eq null` is IS NULL and `ne null` is IS NOT NULL; a null element of an
+ *   `in` list matches a null field; an `undefined` value means null.
+ * - Every other comparison is false for a null field: `ne "x"`, `not_in`,
+ *   ranges and the string operators only match fields that have a value.
+ * - `mode: "insensitive"` compares strings case-insensitively (never `id`).
+ * - `id` is the document id.
+ */
 function matchesCondition(
 	appData: Record<string, any>,
 	cond: WhereCondition,
 ): boolean {
-	const val = appData[cond.field];
-	const op = (cond.operator || "eq") as string;
+	// A row read from Firestore carries canonical field names; a row staged
+	// in a transaction keeps the names the factory mapped the data to.
+	const val =
+		cond.field in appData
+			? appData[cond.field]
+			: appData[canonicalizeFieldName(cond.field)];
+	const insensitive = cond.mode === "insensitive" && cond.field !== "id";
+	const norm = (value: unknown) => {
+		const c = comparable(value);
+		return insensitive && typeof c === "string" ? c.toLowerCase() : c;
+	};
+	const equals = (target: unknown) =>
+		isNullish(target)
+			? isNullish(val)
+			: !isNullish(val) && norm(val) === norm(target);
+	const list = (): unknown[] =>
+		Array.isArray(cond.value) ? cond.value : [cond.value];
+	const op = operatorOf(cond);
 	switch (op) {
 		case "eq":
-		case "==":
-			return comparable(val) === comparable(cond.value);
+			return equals(cond.value);
 		case "ne":
-		case "!=":
-			return comparable(val) !== comparable(cond.value);
+			return isNullish(cond.value)
+				? !isNullish(val)
+				: !isNullish(val) && !equals(cond.value);
 		case "in":
-			return Array.isArray(cond.value)
-				? cond.value.map(comparable).includes(comparable(val))
-				: comparable(val) === comparable(cond.value);
-		case "notIn":
+			return list().some(equals);
 		case "not_in":
-			return Array.isArray(cond.value)
-				? !cond.value.map(comparable).includes(comparable(val))
-				: comparable(val) !== comparable(cond.value);
+			return !isNullish(val) && !list().some(equals);
 		case "gt":
 		case "gte":
 		case "lt":
 		case "lte":
 			return compareRelational(val, cond.value, op);
 		case "contains":
-		case "array-contains":
-			if (Array.isArray(val)) return val.includes(cond.value);
-			if (typeof val === "string") return val.includes(String(cond.value));
-			return false;
-		case "startsWith":
-		case "starts-with":
+			if (Array.isArray(val))
+				return val.some((item) => norm(item) === norm(cond.value));
+			return (
+				typeof val === "string" &&
+				String(norm(val)).includes(String(norm(cond.value)))
+			);
 		case "starts_with":
-			return typeof val === "string" && val.startsWith(String(cond.value));
-		case "endsWith":
-		case "ends-with":
+			return (
+				typeof val === "string" &&
+				String(norm(val)).startsWith(String(norm(cond.value)))
+			);
 		case "ends_with":
-			return typeof val === "string" && val.endsWith(String(cond.value));
+			return (
+				typeof val === "string" &&
+				String(norm(val)).endsWith(String(norm(cond.value)))
+			);
 		default:
-			return val === cond.value;
+			return equals(cond.value);
 	}
-}
-
-/**
- * Look up a single doc inside a transaction, mirroring the non-tx
- * findOne/update path. An `id eq value` condition resolves through
- * `col.doc(id)` because Firestore document IDs are metadata, not fields —
- * they can't be queried with `.where("id", ...)` — and any remaining
- * conditions are checked in memory (better-auth pairs `id` with an
- * ownership or status clause, e.g. when it consumes a device code).
- * Returns undefined when nothing matches.
- */
-async function lookupTxDoc(
-	transaction: Transaction,
-	col: FirebaseFirestore.CollectionReference,
-	where: WhereCondition[] | undefined,
-	mapper: FieldMapper,
-): Promise<FirebaseFirestore.DocumentSnapshot | undefined> {
-	const { id, rest } = splitIdEqCondition(where);
-	if (id !== undefined) {
-		const snap = await transaction.get(col.doc(id));
-		if (!snap.exists) return undefined;
-		if (
-			rest &&
-			!matchesWhere(
-				{ id: snap.id, ...dbDataToAppData(snap.data() ?? {}, mapper) },
-				rest,
-			)
-		)
-			return undefined;
-		return snap;
-	}
-	for (const whereClause of getChunkedWhereClauses(where)) {
-		const q = applyWhereClause(col, whereClause, mapper);
-		const snap = await transaction.get(q.limit(1));
-		if (snap.docs[0]) return snap.docs[0];
-	}
-	return undefined;
-}
-
-/**
- * Splits an `id` equality condition out of a where clause.
- *
- * Firestore document IDs are metadata, not fields, so `where("id", "==", …)`
- * silently matches nothing. Callers must resolve the doc by ref and evaluate
- * the remaining conditions themselves, as `lookupTxDoc` does.
- */
-function splitIdEqCondition(where: WhereCondition[] | undefined): {
-	id?: string;
-	rest: WhereCondition[] | undefined;
-} {
-	if (!where || where.length === 0) return { rest: where };
-	const idCond = where.find(
-		(w) => w.field === "id" && (w.operator === "eq" || !w.operator),
-	);
-	if (!idCond || typeof idCond.value !== "string") return { rest: where };
-	const rest = where.filter((w) => w !== idCond);
-	return { id: idCond.value, rest: rest.length > 0 ? rest : undefined };
 }
 
 /** Convert a Firestore document body (db-side keys, Timestamps) to app shape. */
@@ -710,83 +630,282 @@ function dbDataToAppData(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Reading a where clause
+// ─────────────────────────────────────────────────────────────────────────────
+// Every method, plain and transactional, finds its documents through
+// `readMatches`, so a where clause means the same thing everywhere. Each OR
+// group is planned on its own (`planGroup`):
+//
+// - An `id` `eq` / `in` condition reads those documents directly. The id is
+//   document metadata, not a field: `where("id", …)` matches nothing.
+// - Firestore evaluates only what its automatic single-field indexes serve,
+//   so no consumer has to create a composite index: the group's equality
+//   filters if it has any, otherwise its range filters on one field. An
+//   equality next to a range on another field (`identifier == … AND
+//   createdAt <= …`, `userId == … AND expiresAt > …`), or ranges on two
+//   fields, would need one.
+// - Everything else is checked in memory by `matchesCondition` on the
+//   documents Firestore returns: the remaining ranges, every other `id`
+//   condition (`ne`, `not_in`, ranges — compared with the document id),
+//   comparisons with null (Firestore's `== null` misses a field that was
+//   never written), `ne`, `not_in`, `contains`, `ends_with` and
+//   case-insensitive conditions.
+//
+// Better Auth narrows every query by an id or an equality on a key, so the
+// in-memory part sees a handful of documents. A group with no equality and
+// no range reads the whole collection.
+
+interface GroupPlan {
+	/** Documents to read by id; the rest of the group is checked in memory. */
+	docIds?: string[];
+	/** Conditions Firestore evaluates. Empty: read the whole collection. */
+	server: WhereCondition[];
+	/** Conditions checked in memory on every document Firestore returns. */
+	memory: WhereCondition[];
+}
+
+const isRangeOperator = (op: string): boolean =>
+	op === "gt" ||
+	op === "gte" ||
+	op === "lt" ||
+	op === "lte" ||
+	op === "starts_with";
+
+/** Plans one AND group, or returns `null` when it cannot match a document. */
+function planGroup(group: WhereCondition[]): GroupPlan | null {
+	const pin = group.find(
+		(w) =>
+			w.field === "id" && (operatorOf(w) === "eq" || operatorOf(w) === "in"),
+	);
+	if (pin) {
+		const values: unknown[] = Array.isArray(pin.value)
+			? pin.value
+			: [pin.value];
+		const docIds = [
+			...new Set(
+				values.filter((v): v is string => typeof v === "string" && v !== ""),
+			),
+		];
+		// Every document has a non-empty string id.
+		if (docIds.length === 0) return null;
+		return { docIds, server: [], memory: group.filter((w) => w !== pin) };
+	}
+
+	const serverSafe = (w: WhereCondition) =>
+		w.field !== "id" && w.mode !== "insensitive";
+	const equality: WhereCondition[] = [];
+	for (const w of group) {
+		const op = operatorOf(w);
+		if (op === "in") {
+			if (Array.isArray(w.value) && w.value.length === 0) return null;
+			// One `in` per query keeps Firestore's disjunction limit out of reach.
+			if (
+				serverSafe(w) &&
+				Array.isArray(w.value) &&
+				!w.value.some(isNullish) &&
+				!equality.some((e) => operatorOf(e) === "in")
+			)
+				equality.push(w);
+		} else if (op === "eq" && serverSafe(w) && !isNullish(w.value)) {
+			equality.push(w);
+		}
+	}
+	if (equality.length > 0)
+		return {
+			server: equality,
+			memory: group.filter((w) => !equality.includes(w)),
+		};
+
+	const ranges = group.filter((w) => {
+		const op = operatorOf(w);
+		return (
+			serverSafe(w) &&
+			isRangeOperator(op) &&
+			!isNullish(w.value) &&
+			(op !== "starts_with" || typeof w.value === "string")
+		);
+	});
+	const field = ranges[0]?.field;
+	const server = ranges.filter((w) => w.field === field);
+	return { server, memory: group.filter((w) => !server.includes(w)) };
+}
+
+/** How `readMatches` reads: plainly, or inside a Firestore transaction. */
+interface DocReader {
+	query(
+		query: FirebaseFirestore.Query,
+	): Promise<FirebaseFirestore.QueryDocumentSnapshot[]>;
+	byRef(
+		refs: FirebaseFirestore.DocumentReference[],
+	): Promise<FirebaseFirestore.DocumentSnapshot[]>;
+}
+
+const plainReader = (db: Firestore): DocReader => ({
+	query: async (query) => (await query.get()).docs,
+	byRef: async (refs) => (refs.length > 0 ? db.getAll(...refs) : []),
+});
+
+const transactionReader = (transaction: Transaction): DocReader => ({
+	query: async (query) => (await transaction.get(query)).docs,
+	byRef: async (refs) => (refs.length > 0 ? transaction.getAll(...refs) : []),
+});
+
+function buildQuery(
+	query: FirebaseFirestore.Query,
+	conditions: WhereCondition[],
+	mapper: FieldMapper,
+): FirebaseFirestore.Query {
+	let q = query;
+	for (const w of conditions)
+		q = applyOperator(q, mapper.toDb(w.field), operatorOf(w), w.value);
+	return q;
+}
+
+/** Runs the Firestore half of a plan, splitting an oversized `in`. */
+async function queryServer(
+	reader: DocReader,
+	col: FirebaseFirestore.CollectionReference,
+	conditions: WhereCondition[],
+	mapper: FieldMapper,
+	limit: number | undefined,
+): Promise<FirebaseFirestore.QueryDocumentSnapshot[]> {
+	const docs: FirebaseFirestore.QueryDocumentSnapshot[] = [];
+	for (const chunk of getChunkedWhereClauses(conditions)) {
+		let q = buildQuery(col, chunk ?? [], mapper);
+		if (limit !== undefined) q = q.limit(limit - docs.length);
+		docs.push(...(await reader.query(q)));
+		if (limit !== undefined && docs.length >= limit) break;
+	}
+	return docs;
+}
+
+/** A document that satisfies a where clause. */
+interface Match {
+	ref: FirebaseFirestore.DocumentReference;
+	/** `id` plus the document's fields under their app-side names. */
+	row: Record<string, any>;
+}
+
+/**
+ * What the transaction adapter has staged for a document: its staged row
+ * (re-checked against the whole group), `null` when it is staged for
+ * deletion, `undefined` when nothing is staged.
+ */
+type ReadOverlay = (
+	ref: FirebaseFirestore.DocumentReference,
+) => Record<string, any> | null | undefined;
+
+/**
+ * Every document that satisfies `where`, each once, in the order Firestore
+ * returns them; with `limit`, only the first ones.
+ */
+async function readMatches(
+	reader: DocReader,
+	col: FirebaseFirestore.CollectionReference,
+	where: WhereCondition[] | undefined,
+	mapper: FieldMapper,
+	options: { limit?: number; overlay?: ReadOverlay } = {},
+): Promise<Match[]> {
+	const { limit, overlay } = options;
+	const groups = where && where.length > 0 ? splitOrGroups(where) : [[]];
+	const matches = new Map<string, Match>();
+	for (const group of groups) {
+		const plan = planGroup(group);
+		if (!plan) continue;
+		// Firestore may stop early only when it decides the whole match.
+		const serverLimit =
+			groups.length === 1 && plan.memory.length === 0 && !overlay
+				? limit
+				: undefined;
+		const snaps = plan.docIds
+			? await reader.byRef(plan.docIds.map((id) => col.doc(id)))
+			: await queryServer(reader, col, plan.server, mapper, serverLimit);
+		for (const snap of snaps) {
+			if (!snap.exists || matches.has(snap.ref.path)) continue;
+			const staged = overlay?.(snap.ref);
+			if (staged === null) continue;
+			const row = staged
+				? { ...staged }
+				: { id: snap.id, ...dbDataToAppData(snap.data() ?? {}, mapper) };
+			const conditions = staged ? group : plan.memory;
+			if (!conditions.every((cond) => matchesCondition(row, cond))) continue;
+			matches.set(snap.ref.path, { ref: snap.ref, row });
+			if (limit !== undefined && matches.size >= limit)
+				return Array.from(matches.values());
+		}
+	}
+	return Array.from(matches.values());
+}
+
+/**
+ * The Firestore query that decides `where` on its own (one AND group,
+ * nothing left for memory, no direct id reads, no oversized `in`), or
+ * `undefined`. Only such a query can be counted, sorted or paged by
+ * Firestore.
+ */
+function exactServerQuery(
+	col: FirebaseFirestore.CollectionReference,
+	where: WhereCondition[] | undefined,
+	mapper: FieldMapper,
+): { query: FirebaseFirestore.Query; hasRange: boolean } | undefined {
+	const groups = where && where.length > 0 ? splitOrGroups(where) : [[]];
+	const [group] = groups;
+	if (groups.length !== 1 || !group) return undefined;
+	const plan = planGroup(group);
+	if (!plan || plan.docIds || plan.memory.length > 0) return undefined;
+	if (findOversizedInClause(plan.server)) return undefined;
+	return {
+		query: buildQuery(col, plan.server, mapper),
+		hasRange: plan.server.some((w) => isRangeOperator(operatorOf(w))),
+	};
+}
+
+/** Sorts rows in memory, the way `findMany` does wherever Firestore can't. */
+function sortRows(
+	rows: Record<string, any>[],
+	sortBy: { field: string; direction: "asc" | "desc" } | undefined,
+): Record<string, any>[] {
+	if (!sortBy?.field) return rows;
+	const dir = sortBy.direction === "desc" ? -1 : 1;
+	return [...rows].sort((a, b) => {
+		const aVal = a[sortBy.field];
+		const bVal = b[sortBy.field];
+		if (aVal < bVal) return -1 * dir;
+		if (aVal > bVal) return 1 * dir;
+		return 0;
+	});
+}
+
+/** Applies a `select` list: the selected fields that are set, plus `id`. */
+function selectFields(
+	row: Record<string, any>,
+	select: string[] | undefined,
+): Record<string, any> {
+	if (!select || select.length === 0) return row;
+	const selected: Record<string, any> = { id: row.id };
+	for (const field of select) {
+		if (row[field] !== undefined) selected[field] = row[field];
+	}
+	return selected;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Guarded single-row mutation (`incrementOne`)
 // ─────────────────────────────────────────────────────────────────────────────
 // better-auth uses `incrementOne` as its compare-and-swap primitive: the
 // `where` clause is both selector and guard (`count < max`, `lockedUntil <=
-// now`, `status == "pending"`, …) and the row is mutated only while the
-// guard still holds. Since 1.7 the adapter must provide it natively — the
-// factory's `transaction(findMany + updateMany)` fallback is gone.
+// now`, `revoked == null`, `status == "pending"`, …) and the row is mutated
+// only while the guard still holds. Since 1.7 the adapter must provide it
+// natively — the factory's `transaction(findMany + updateMany)` fallback is
+// gone.
 //
 // Firestore has no conditional update, so we run a transaction: read the
-// candidate rows, evaluate the guard in memory, write once. Firestore
+// first row that satisfies the guard (`readMatches`), write once. Firestore
 // serializes the transaction against concurrent writes to the rows it read,
 // which gives the same "at most one row, only while the guard holds"
-// semantics as `UPDATE … WHERE … RETURNING *`.
-//
-// Only equality filters (`eq` / `in`) are sent to Firestore; every other
-// operator is evaluated in memory. Equality-only queries are served by
-// Firestore's automatic single-field indexes, whereas mixing an equality on
-// one field with a range on another (exactly the limiter's `key == … AND
-// lastRequest > … AND count < …`) would demand a composite index from every
-// consumer. Every better-auth caller selects by `id` or a unique key, so the
-// equality prefix narrows the read to a single document in practice; a
-// where clause with no equality condition at all falls back to scanning
-// the collection.
-
-const isEqualityOperator = (operator: string | undefined): boolean =>
-	operator === undefined ||
-	operator === "eq" ||
-	operator === "==" ||
-	operator === "in";
-
-/**
- * Reads every existing document that could satisfy `where`, inside
- * `transaction`, using only equality filters (see the section header).
- * Callers still have to apply the full `where` with `matchesWhere`. Results
- * are deduplicated across OR groups and oversized `in` chunks.
- */
-async function collectGuardCandidates(
-	transaction: Transaction,
-	col: FirebaseFirestore.CollectionReference,
-	where: WhereCondition[] | undefined,
-	mapper: FieldMapper,
-): Promise<FirebaseFirestore.DocumentSnapshot[]> {
-	const byPath = new Map<string, FirebaseFirestore.DocumentSnapshot>();
-	const add = (snap: FirebaseFirestore.DocumentSnapshot) => {
-		if (snap.exists && !byPath.has(snap.ref.path))
-			byPath.set(snap.ref.path, snap);
-	};
-
-	const groups = where && where.length > 0 ? splitOrGroups(where) : [[]];
-	for (const group of groups) {
-		// Document IDs are metadata, not fields: an `id` equality resolves to
-		// direct reads and the rest of the group is checked in memory.
-		const idCond = group.find(
-			(w) => w.field === "id" && isEqualityOperator(w.operator),
-		);
-		if (idCond) {
-			const ids = (
-				Array.isArray(idCond.value) ? idCond.value : [idCond.value]
-			).filter((id): id is string => typeof id === "string" && id !== "");
-			if (ids.length === 0) continue;
-			const snaps = await transaction.getAll(...ids.map((id) => col.doc(id)));
-			for (const snap of snaps) add(snap);
-			continue;
-		}
-
-		const serverSide = group
-			.filter((w) => w.field !== "id" && isEqualityOperator(w.operator))
-			.map((w): WhereCondition => ({ ...w, connector: "AND" }));
-		for (const chunk of getChunkedWhereClauses(
-			serverSide.length > 0 ? serverSide : undefined,
-		)) {
-			const snap = await transaction.get(applyWhereClause(col, chunk, mapper));
-			for (const doc of snap.docs) add(doc);
-		}
-	}
-	return Array.from(byPath.values());
-}
+// semantics as `UPDATE … WHERE … RETURNING *`. As everywhere, only the
+// equality part of the guard reaches Firestore, so the limiter's `key == …
+// AND lastRequest > … AND count < …` needs no composite index.
 
 interface IncrementPatch {
 	/** Absolute assignments, db-side keys — ready for `transaction.update`. */
@@ -926,6 +1045,7 @@ export const firestoreAdapter: (
 		collectionsOverride,
 	);
 	const mapper = mapFieldsFactory(preferSnakeCase);
+	const directReader = plainReader(db);
 
 	// ───────────────────────────────────────────────────────────────────────
 	// Transaction adapter
@@ -940,9 +1060,39 @@ export const firestoreAdapter: (
 		buffer: TxBuffer,
 		schema: AdapterSchema | undefined,
 	): CustomAdapter => {
-		// Subset of the non-tx `findMany` path: no OR-split queries or
-		// direct `id` lookups. better-auth's tx callbacks (e.g.
-		// consumeVerificationValue) only issue simple equality filters.
+		const reader = transactionReader(transaction);
+		const overlay: ReadOverlay = (ref) => {
+			const staged = buffer.getByPath(ref.path);
+			if (!staged) return undefined;
+			return staged.op === "delete" ? null : staged.appData;
+		};
+
+		/**
+		 * Rows that satisfy `where` in this transaction: staged creates first
+		 * (Firestore can't see them until the flush), then Firestore documents
+		 * with their staged writes applied and staged deletes left out.
+		 */
+		const txMatches = async (
+			model: string,
+			where: WhereCondition[] | undefined,
+			limit?: number,
+		): Promise<Match[]> => {
+			const matches: Match[] = buffer
+				.createsMatching(model, where)
+				.map((entry) => ({ ref: entry.ref, row: { ...entry.appData } }));
+			if (limit !== undefined && matches.length >= limit)
+				return matches.slice(0, limit);
+			const staged = new Set(matches.map((m) => m.ref.path));
+			const col = getCollectionRef(db, model, collections);
+			for (const match of await readMatches(reader, col, where, mapper, {
+				limit,
+				overlay,
+			})) {
+				if (!staged.has(match.ref.path)) matches.push(match);
+			}
+			return limit === undefined ? matches : matches.slice(0, limit);
+		};
+
 		const txFindMany = async ({
 			model,
 			where,
@@ -950,49 +1100,10 @@ export const firestoreAdapter: (
 			offset,
 			sortBy,
 		}: any): Promise<any[]> => {
-			const col = getCollectionRef(db, model, collections);
-			const byPath = new Map<string, Record<string, any>>();
-
-			// 1. Real reads (chunked for oversized `in` clauses), overlaying
-			//    any staged update and dropping any staged delete.
-			for (const whereClause of getChunkedWhereClauses(where)) {
-				const q = applyWhereClause(col, whereClause, mapper);
-				const snap = await transaction.get(q);
-				for (const doc of snap.docs) {
-					if (buffer.isDeleted(doc.ref.path)) continue;
-					const staged = buffer.getByPath(doc.ref.path);
-					if (staged && staged.op !== "delete") {
-						byPath.set(doc.ref.path, { ...staged.appData });
-						continue;
-					}
-					const data = doc.data();
-					if (!data) continue;
-					byPath.set(doc.ref.path, {
-						id: doc.id,
-						...dbDataToAppData(data, mapper),
-					});
-				}
-			}
-
-			// 2. Overlay: staged creates in this transaction that match `where`.
-			for (const entry of buffer.values()) {
-				if (entry.op !== "create" || entry.model !== model) continue;
-				if (!byPath.has(entry.ref.path) && matchesWhere(entry.appData, where)) {
-					byPath.set(entry.ref.path, { ...entry.appData });
-				}
-			}
-
-			let results = Array.from(byPath.values());
-			if (sortBy?.field) {
-				results.sort((a, b) => {
-					const aVal = a[sortBy.field];
-					const bVal = b[sortBy.field];
-					const dir = sortBy.direction === "desc" ? -1 : 1;
-					if (aVal < bVal) return -1 * dir;
-					if (aVal > bVal) return 1 * dir;
-					return 0;
-				});
-			}
+			let results = sortRows(
+				(await txMatches(model, where)).map((m) => m.row),
+				sortBy,
+			);
 			if (offset) results = results.slice(offset);
 			if (limit !== undefined) results = results.slice(0, limit);
 			return results;
@@ -1015,71 +1126,28 @@ export const firestoreAdapter: (
 				const entry = buffer.stageCreate(model, ref, docData, normalizedData);
 				return { ...entry.appData };
 			},
+			// Stages the update, merged into whatever is already staged for the
+			// document (a create stays a create), so the flush emits one write.
 			update: async ({ model, where, update }: any): Promise<any> => {
-				const col = getCollectionRef(db, model, collections);
 				const normalizedUpdate = normalizeWriteData(model, update);
 				const { docData: updateData } = buildFirestoreWriteData(
 					normalizedUpdate,
 					mapper,
 				);
-
-				// 1. Overlay: target may already be staged as a create in
-				//    this same transaction. Mutate it in place so the flush
-				//    emits one combined `set`.
-				const stagedCreate = buffer.findCreateMatching(model, where);
-				if (stagedCreate) {
-					Object.assign(stagedCreate.docData, updateData);
-					Object.assign(stagedCreate.appData, normalizedUpdate);
-					return { ...stagedCreate.appData };
-				}
-
-				// 2. Otherwise read from Firestore (still safe — no writes
-				//    have been flushed yet) to locate the target doc.
-				const doc = await lookupTxDoc(transaction, col, where, mapper);
-				if (!doc) return null;
-
-				// 3. Same ref may already have an update staged; merge.
-				//    (A staged delete is skipped — falls through to stage a
-				//    fresh update below, mirroring "not currently buffered".)
-				const existing = buffer.getByPath(doc.ref.path);
-				if (existing && existing.op !== "delete") {
-					Object.assign(existing.docData, updateData);
-					Object.assign(existing.appData, normalizedUpdate);
-					return { ...existing.appData };
-				}
-
-				// 4. Stage a fresh update.
-				const baseAppData = dbDataToAppData(doc.data() ?? {}, mapper);
+				const [match] = await txMatches(model, where, 1);
+				if (!match) return null;
 				const entry = buffer.stageUpdate(
 					model,
-					doc.ref,
+					match.ref,
 					updateData,
 					normalizedUpdate,
-					baseAppData,
+					match.row,
 				);
 				return { ...entry.appData };
 			},
 			findOne: async ({ model, where }: any): Promise<any> => {
-				const col = getCollectionRef(db, model, collections);
-
-				// 1. Overlay: return any matching staged create directly.
-				const stagedCreate = buffer.findCreateMatching(model, where);
-				if (stagedCreate) return { ...stagedCreate.appData };
-
-				// 2. Real read.
-				const doc = await lookupTxDoc(transaction, col, where, mapper);
-				if (!doc) return null;
-
-				// 3. A pending delete makes this doc invisible.
-				if (buffer.isDeleted(doc.ref.path)) return null;
-
-				// 4. Layer any pending update on top of the snapshot.
-				const staged = buffer.getByPath(doc.ref.path);
-				if (staged && staged.op !== "delete") return { ...staged.appData };
-
-				const data = doc.data();
-				if (!data) return null;
-				return { id: doc.id, ...dbDataToAppData(data, mapper) };
+				const [match] = await txMatches(model, where, 1);
+				return match ? { ...match.row } : null;
 			},
 			findMany: txFindMany,
 			// `runWithTransaction` hands the factory-wrapped form of this
@@ -1087,7 +1155,7 @@ export const firestoreAdapter: (
 			// the full `CustomAdapter` surface — the organization plugin
 			// counts members inside its transactions.
 			count: async ({ model, where }: any) => {
-				return (await txFindMany({ model, where })).length;
+				return (await txMatches(model, where)).length;
 			},
 			// Mirrors the non-tx `updateMany`, but stages every write in the
 			// buffer so reads later in the same transaction observe them and
@@ -1104,213 +1172,66 @@ export const firestoreAdapter: (
 			//
 			// Returns the number of affected docs.
 			updateMany: async ({ model, where, update }: any) => {
-				const col = getCollectionRef(db, model, collections);
 				const normalizedUpdate = normalizeWriteData(model, update);
 				const { docData: updateData } = buildFirestoreWriteData(
 					normalizedUpdate,
 					mapper,
 				);
-				let count = 0;
-				const seenPaths = new Set<string>();
-
-				/** Merge into an existing staged write, or stage a fresh one. */
-				const applyTo = (
-					ref: FirebaseFirestore.DocumentReference,
-					baseAppData: Record<string, any>,
-				) => {
-					const existing = buffer.getByPath(ref.path);
-					if (existing && existing.op !== "delete") {
-						Object.assign(existing.docData, updateData);
-						Object.assign(existing.appData, normalizedUpdate);
-					} else {
-						buffer.stageUpdate(
-							model,
-							ref,
-							updateData,
-							normalizedUpdate,
-							baseAppData,
-						);
-					}
-					count++;
-				};
-
-				// `id` can't go through a Firestore query — it's document
-				// metadata, not a field. better-auth's `incrementOne` fallback
-				// appends exactly such a condition to its compare-and-swap
-				// guard, so without this branch every increment matched zero
-				// docs and the rate limiter denied every request.
-				const { id: idFilter, rest } = splitIdEqCondition(where);
-				if (idFilter) {
-					const ref = col.doc(idFilter);
-					if (buffer.isDeleted(ref.path)) return 0;
-					const staged = buffer.getByPath(ref.path);
-					if (staged && staged.op !== "delete") {
-						if (matchesWhere(staged.appData, rest)) applyTo(ref, {});
-						return count;
-					}
-					const snap = await transaction.get(ref);
-					if (!snap.exists) return 0;
-					const appData = {
-						id: snap.id,
-						...dbDataToAppData(snap.data() ?? {}, mapper),
-					};
-					if (matchesWhere(appData, rest)) applyTo(ref, appData);
-					return count;
+				const matches = await txMatches(model, where);
+				for (const match of matches) {
+					buffer.stageUpdate(
+						model,
+						match.ref,
+						updateData,
+						normalizedUpdate,
+						match.row,
+					);
 				}
-
-				// 1. Real reads (chunked for oversized `in` clauses). A staged
-				//    delete hides the doc; an existing staged write merges in
-				//    place, mirroring step 3 of the single-doc `update`.
-				for (const whereClause of getChunkedWhereClauses(where)) {
-					const q = applyWhereClause(col, whereClause, mapper);
-					const snap = await transaction.get(q);
-					for (const doc of snap.docs) {
-						if (seenPaths.has(doc.ref.path) || buffer.isDeleted(doc.ref.path))
-							continue;
-						seenPaths.add(doc.ref.path);
-						applyTo(doc.ref, dbDataToAppData(doc.data() ?? {}, mapper));
-					}
-				}
-
-				// 2. Staged creates are invisible to Firestore queries until
-				//    flush, so fold them in by hand. Mutating in place keeps
-				//    the entry a `create`, so the flush still emits one `set`.
-				for (const entry of buffer.values()) {
-					if (entry.op !== "create" || entry.model !== model) continue;
-					if (seenPaths.has(entry.ref.path) || buffer.isDeleted(entry.ref.path))
-						continue;
-					if (!matchesWhere(entry.appData, where)) continue;
-					seenPaths.add(entry.ref.path);
-					Object.assign(entry.docData, updateData);
-					Object.assign(entry.appData, normalizedUpdate);
-					count++;
-				}
-
-				return count;
+				return matches.length;
 			},
+			// `consumeVerificationValue` runs its cleanup through this:
+			// `identifier ==`, `id != latest`, `createdAt <= latest.createdAt`.
 			deleteMany: async ({ model, where }: any) => {
-				const col = getCollectionRef(db, model, collections);
-				let count = 0;
-				const seenPaths = new Set<string>();
-				for (const whereClause of getChunkedWhereClauses(where)) {
-					const q = applyWhereClause(col, whereClause, mapper);
-					const snap = await transaction.get(q);
-					for (const doc of snap.docs) {
-						if (seenPaths.has(doc.ref.path) || buffer.isDeleted(doc.ref.path))
-							continue;
-						seenPaths.add(doc.ref.path);
-						buffer.stageDelete(model, doc.ref);
-						count++;
-					}
-				}
-				// Staged creates are invisible to Firestore queries until flush.
-				for (const entry of buffer.values()) {
-					if (entry.op !== "create" || entry.model !== model) continue;
-					if (seenPaths.has(entry.ref.path) || buffer.isDeleted(entry.ref.path))
-						continue;
-					if (!matchesWhere(entry.appData, where)) continue;
-					seenPaths.add(entry.ref.path);
-					buffer.stageDelete(model, entry.ref);
-					count++;
-				}
-				return count;
+				const matches = await txMatches(model, where);
+				for (const match of matches) buffer.stageDelete(model, match.ref);
+				return matches.length;
 			},
 			// Single-doc variant of `deleteMany`: `deleteWithHooks` and the
 			// organization plugin call `delete` on the current adapter
 			// inside transactions.
 			delete: async ({ model, where }: any) => {
-				const col = getCollectionRef(db, model, collections);
-				const stagedCreate = buffer.findCreateMatching(model, where);
-				if (stagedCreate) {
-					buffer.stageDelete(model, stagedCreate.ref);
-					return;
-				}
-				const doc = await lookupTxDoc(transaction, col, where, mapper);
-				if (!doc || buffer.isDeleted(doc.ref.path)) return;
-				buffer.stageDelete(model, doc.ref);
+				const [match] = await txMatches(model, where, 1);
+				if (match) buffer.stageDelete(model, match.ref);
 			},
 			// Transactional `incrementOne` (see the section header above
-			// `collectGuardCandidates`). The enclosing Firestore transaction
+			// `buildIncrementPatch`). The enclosing Firestore transaction
 			// already provides atomicity, so this only has to find the first
-			// row that satisfies the guard — staged creates first, then real
-			// reads overlaid with staged updates — and fold the patch into
-			// the buffer so the flush emits one write per ref.
+			// row that satisfies the guard and fold the patch into the buffer
+			// so the flush emits one write per ref.
 			incrementOne: async ({
 				model,
 				where,
 				increment,
 				set,
 			}: any): Promise<any> => {
-				const col = getCollectionRef(db, model, collections);
 				const patch = buildIncrementPatch(model, increment, set, mapper);
-
-				const stagedCreate = buffer.findCreateMatching(model, where);
-				if (stagedCreate) {
-					const { docData, appPatch } = applyIncrementPatch(
-						stagedCreate.appData,
-						patch,
-					);
-					Object.assign(stagedCreate.docData, docData);
-					Object.assign(stagedCreate.appData, appPatch);
-					return { ...stagedCreate.appData };
-				}
-
-				const candidates = await collectGuardCandidates(
-					transaction,
-					col,
-					where,
-					mapper,
+				const [match] = await txMatches(model, where, 1);
+				if (!match) return null;
+				const { docData, appPatch } = applyIncrementPatch(match.row, patch);
+				const entry = buffer.stageUpdate(
+					model,
+					match.ref,
+					docData,
+					appPatch,
+					match.row,
 				);
-				for (const snap of candidates) {
-					if (buffer.isDeleted(snap.ref.path)) continue;
-					const staged = buffer.getByPath(snap.ref.path);
-					const current =
-						staged && staged.op !== "delete"
-							? staged.appData
-							: {
-									id: snap.id,
-									...dbDataToAppData(snap.data() ?? {}, mapper),
-								};
-					if (!matchesWhere(current, where)) continue;
-					const { docData, appPatch } = applyIncrementPatch(current, patch);
-					if (staged && staged.op !== "delete") {
-						Object.assign(staged.docData, docData);
-						Object.assign(staged.appData, appPatch);
-						return { ...staged.appData };
-					}
-					const entry = buffer.stageUpdate(
-						model,
-						snap.ref,
-						docData,
-						appPatch,
-						current,
-					);
-					return { ...entry.appData };
-				}
-				return null;
+				return { ...entry.appData };
 			},
 			consumeOne: async ({ model, where }: any): Promise<any> => {
-				const col = getCollectionRef(db, model, collections);
-				const stagedCreate = buffer.findCreateMatching(model, where);
-				if (stagedCreate) {
-					buffer.stageDelete(model, stagedCreate.ref);
-					return { ...stagedCreate.appData };
-				}
-				const doc = await lookupTxDoc(transaction, col, where, mapper);
-				if (!doc || buffer.isDeleted(doc.ref.path)) return null;
-				const staged = buffer.getByPath(doc.ref.path);
-				const appData =
-					staged && staged.op !== "delete"
-						? { ...staged.appData }
-						: (() => {
-								const data = doc.data();
-								return data
-									? { id: doc.id, ...dbDataToAppData(data, mapper) }
-									: null;
-							})();
-				if (!appData) return null;
-				buffer.stageDelete(model, doc.ref);
-				return appData;
+				const [match] = await txMatches(model, where, 1);
+				if (!match) return null;
+				buffer.stageDelete(model, match.ref);
+				return match.row;
 			},
 		};
 	};
@@ -1412,82 +1333,17 @@ export const firestoreAdapter: (
 						model,
 						update as Record<string, any>,
 					);
-
-					// `id` is document metadata, not a field: resolve by ref and check
-					// any remaining conditions in memory before writing.
-					const { id: idFilter, rest: restWhere } = splitIdEqCondition(where);
-					if (idFilter !== undefined) {
-						const docId = idFilter;
-						const docRef = col.doc(docId);
-						if (debugLogs) {
-							console.log(`[Firestore Adapter] UPDATE ${model}:`, {
-								where,
-								update,
-								"using direct doc lookup": docId,
-							});
-						}
-						const doc = await docRef.get();
-						if (!doc || !doc.exists) {
-							if (debugLogs) {
-								console.log(
-									`[Firestore Adapter] UPDATE ${model} - no document found by ID`,
-								);
-							}
-							return null as any;
-						}
-						if (
-							restWhere &&
-							!matchesWhere(
-								{ id: doc.id, ...dbDataToAppData(doc.data() ?? {}, mapper) },
-								restWhere,
-							)
-						)
-							return null as any;
-
-						const { docData: updateData } = buildFirestoreWriteData(
-							normalizedUpdate as Record<string, any>,
-							mapper,
-						);
-						if (debugLogs) {
-							console.log(
-								`[Firestore Adapter] UPDATE ${model} - updateData:`,
-								updateData,
-							);
-						}
-						await docRef.update(updateData);
-						// Read the updated document to return full object
-						const updated = await docRef.get();
-						const result: any = { id: updated.id };
-						const updatedData = updated.data();
-						if (updatedData) {
-							for (const [k, v] of Object.entries(updatedData)) {
-								result[mapper.fromDb(k)] = convertTimestamp(v);
-							}
-						}
-						if (debugLogs) {
-							console.log(
-								`[Firestore Adapter] UPDATE ${model} - returning:`,
-								result,
-							);
-						}
-						return result;
-					}
-
 					if (debugLogs) {
 						console.log(`[Firestore Adapter] UPDATE ${model}:`, {
 							where,
 							update,
-							collection: collections,
+							collectionRef: col.path,
 						});
 					}
-					let doc: FirebaseFirestore.QueryDocumentSnapshot | undefined;
-					for (const whereClause of getChunkedWhereClauses(where)) {
-						const q = applyWhereClause(col, whereClause, mapper);
-						const snap = await q.limit(1).get();
-						doc = snap.docs[0];
-						if (doc) break;
-					}
-					if (!doc) {
+					const [match] = await readMatches(directReader, col, where, mapper, {
+						limit: 1,
+					});
+					if (!match) {
 						if (debugLogs) {
 							console.log(
 								`[Firestore Adapter] UPDATE ${model} - no document found`,
@@ -1497,37 +1353,26 @@ export const firestoreAdapter: (
 					}
 
 					const { docData: updateData } = buildFirestoreWriteData(
-						normalizedUpdate as Record<string, any>,
+						normalizedUpdate,
 						mapper,
 					);
-					if (debugLogs) {
-						console.log(
-							`[Firestore Adapter] UPDATE ${model} - updateData:`,
-							updateData,
-						);
-					}
-					await doc.ref.update(updateData);
+					await match.ref.update(updateData);
 					// Read the updated document to return full object
-					const updated = await doc.ref.get();
-					const result: any = { id: updated.id };
-					const updatedData = updated.data();
-					if (updatedData) {
-						for (const [k, v] of Object.entries(updatedData)) {
-							result[mapper.fromDb(k)] = convertTimestamp(v);
-						}
-					}
+					const updated = await match.ref.get();
+					const result = {
+						id: updated.id,
+						...dbDataToAppData(updated.data() ?? {}, mapper),
+					};
 					if (debugLogs) {
 						console.log(
 							`[Firestore Adapter] UPDATE ${model} - returning:`,
 							result,
 						);
 					}
-					return result;
+					return result as any;
 				},
 				updateMany: async ({ model, where, update }) => {
 					const col = getCollectionRef(db, model, collections);
-					let count = 0;
-					const seenDocIds = new Set<string>();
 					const normalizedUpdate = normalizeWriteData(
 						model,
 						update as Record<string, any>,
@@ -1536,132 +1381,22 @@ export const firestoreAdapter: (
 						normalizedUpdate,
 						mapper,
 					);
-
-					// Same metadata-not-a-field constraint the tx path handles: an
-					// `id` condition has to resolve to a doc ref, with the remaining
-					// conditions checked in memory.
-					const { id: idFilter, rest } = splitIdEqCondition(where);
-					if (idFilter) {
-						const snap = await col.doc(idFilter).get();
-						if (!snap.exists) return 0;
-						const appData = {
-							id: snap.id,
-							...dbDataToAppData(snap.data() ?? {}, mapper),
-						};
-						if (!matchesWhere(appData, rest)) return 0;
-						await snap.ref.update(updateData);
-						return 1;
-					}
-
-					for (const whereClause of getChunkedWhereClauses(where)) {
-						const q = applyWhereClause(col, whereClause, mapper);
-						const snap = await q.get();
-						for (const d of snap.docs) {
-							if (seenDocIds.has(d.id)) continue;
-							seenDocIds.add(d.id);
-							await d.ref.update(updateData);
-							count++;
-						}
-					}
-					return count;
+					const matches = await readMatches(directReader, col, where, mapper);
+					for (const match of matches) await match.ref.update(updateData);
+					return matches.length;
 				},
 				delete: async ({ model, where }) => {
 					const col = getCollectionRef(db, model, collections);
-
-					// `id` is document metadata, not a field: resolve by ref and check
-					// any remaining conditions in memory before deleting.
-					const { id: idFilter, rest: restWhere } = splitIdEqCondition(where);
-					if (idFilter !== undefined) {
-						const docId = idFilter;
-						const docRef = col.doc(docId);
-						if (debugLogs) {
-							console.log(`[Firestore Adapter] DELETE ${model}:`, {
-								where,
-								"using direct doc lookup": docId,
-							});
-						}
-						const doc = await docRef.get();
-						if (
-							doc.exists &&
-							(!restWhere ||
-								matchesWhere(
-									{ id: doc.id, ...dbDataToAppData(doc.data() ?? {}, mapper) },
-									restWhere,
-								))
-						) {
-							await docRef.delete();
-						}
-						return;
-					}
-
-					let doc: FirebaseFirestore.QueryDocumentSnapshot | undefined;
-					for (const whereClause of getChunkedWhereClauses(where)) {
-						const q = applyWhereClause(col, whereClause, mapper);
-						const snap = await q.limit(1).get();
-						doc = snap.docs[0];
-						if (doc) break;
-					}
-					if (doc) await doc.ref.delete();
+					const [match] = await readMatches(directReader, col, where, mapper, {
+						limit: 1,
+					});
+					if (match) await match.ref.delete();
 				},
 				deleteMany: async ({ model, where }) => {
 					const col = getCollectionRef(db, model, collections);
-
-					// Same metadata-not-a-field constraint as `updateMany`: an `id`
-					// condition resolves to a doc ref, the rest is checked in memory.
-					const { id: idFilter, rest: restWhere } = splitIdEqCondition(where);
-					if (idFilter !== undefined) {
-						const snap = await col.doc(idFilter).get();
-						if (!snap.exists) return 0;
-						if (
-							restWhere &&
-							!matchesWhere(
-								{ id: snap.id, ...dbDataToAppData(snap.data() ?? {}, mapper) },
-								restWhere,
-							)
-						)
-							return 0;
-						await snap.ref.delete();
-						return 1;
-					}
-
-					// Firestore's `IN` operator caps at 30 values. If a single where
-					// clause carries more than 30 values, split into sub-queries and
-					// sum the deletes so callers (e.g. better-auth's multi-session
-					// `deleteSessions(tokens)`) don't blow up once they cross the cap.
-					const oversized = findOversizedInClause(where);
-					if (oversized) {
-						let total = 0;
-						for (
-							let i = 0;
-							i < oversized.value.length;
-							i += FIRESTORE_IN_CHUNK_SIZE
-						) {
-							const chunk = oversized.value.slice(
-								i,
-								i + FIRESTORE_IN_CHUNK_SIZE,
-							);
-							const chunkedWhere = (where as WhereCondition[]).map((w) =>
-								w === oversized
-									? { ...w, value: chunk as WhereCondition["value"] }
-									: w,
-							);
-							const cq = applyWhereClause(col, chunkedWhere, mapper);
-							const csnap = await cq.get();
-							for (const d of csnap.docs) {
-								await d.ref.delete();
-								total++;
-							}
-						}
-						return total;
-					}
-					const q = applyWhereClause(col, where, mapper);
-					const snap = await q.get();
-					let count = 0;
-					for (const d of snap.docs) {
-						await d.ref.delete();
-						count++;
-					}
-					return count;
+					const matches = await readMatches(directReader, col, where, mapper);
+					for (const match of matches) await match.ref.delete();
+					return matches.length;
 				},
 				consumeOne: async <T>({
 					model,
@@ -1672,21 +1407,21 @@ export const firestoreAdapter: (
 				}) => {
 					const col = getCollectionRef(db, model, collections);
 					return await db.runTransaction(async (transaction) => {
-						const doc = await lookupTxDoc(transaction, col, where, mapper);
-						if (!doc) return null;
-						const data = doc.data();
-						if (!data) return null;
-						const appData = {
-							id: doc.id,
-							...dbDataToAppData(data, mapper),
-						};
-						transaction.delete(doc.ref);
-						return appData as T;
+						const [match] = await readMatches(
+							transactionReader(transaction),
+							col,
+							where,
+							mapper,
+							{ limit: 1 },
+						);
+						if (!match) return null;
+						transaction.delete(match.ref);
+						return match.row as T;
 					});
 				},
 				// Native guarded counter mutation — required by better-auth 1.7,
 				// preferred over the transaction fallback by 1.6. See the section
-				// header above `collectGuardCandidates` for the design.
+				// header above `buildIncrementPatch` for the design.
 				incrementOne: async <T>({
 					model,
 					where,
@@ -1708,165 +1443,48 @@ export const firestoreAdapter: (
 						});
 					}
 					return await db.runTransaction(async (transaction) => {
-						const candidates = await collectGuardCandidates(
-							transaction,
+						const [match] = await readMatches(
+							transactionReader(transaction),
 							col,
 							where,
 							mapper,
+							{ limit: 1 },
 						);
-						for (const snap of candidates) {
-							const current = {
-								id: snap.id,
-								...dbDataToAppData(snap.data() ?? {}, mapper),
-							};
-							if (!matchesWhere(current, where)) continue;
-							const { docData, appData } = applyIncrementPatch(current, patch);
-							if (Object.keys(docData).length > 0) {
-								transaction.update(snap.ref, docData);
-							}
+						if (!match) {
 							if (debugLogs) {
 								console.log(
-									`[Firestore Adapter] INCREMENTONE ${model} - returning:`,
-									appData,
+									`[Firestore Adapter] INCREMENTONE ${model} - guard matched no document`,
 								);
 							}
-							return appData as T;
+							return null;
+						}
+						const { docData, appData } = applyIncrementPatch(match.row, patch);
+						if (Object.keys(docData).length > 0) {
+							transaction.update(match.ref, docData);
 						}
 						if (debugLogs) {
 							console.log(
-								`[Firestore Adapter] INCREMENTONE ${model} - guard matched no document`,
+								`[Firestore Adapter] INCREMENTONE ${model} - returning:`,
+								appData,
 							);
 						}
-						return null;
+						return appData as T;
 					});
 				},
 				findOne: async ({ model, where, select }) => {
 					const col = getCollectionRef(db, model, collections);
-
-					// Firestore document IDs are metadata, not fields, so an `id`
-					// equality can't go through `.where()`: resolve the doc by ref and
-					// check any remaining conditions in memory.
-					const { id: idFilter, rest: restWhere } = splitIdEqCondition(where);
-					if (idFilter !== undefined) {
-						const docId = idFilter;
-						const docRef = col.doc(docId);
-						if (debugLogs) {
-							console.log(`[Firestore Adapter] FINDONE ${model}:`, {
-								where,
-								select,
-								collection: collections,
-								collectionRef: col.path,
-								"using direct doc lookup": docId,
-								docPath: docRef.path,
-							});
-						}
-						const doc = await docRef.get();
-						if (!doc || !doc.exists) {
-							if (debugLogs) {
-								console.log(
-									`[Firestore Adapter] FINDONE ${model} - no document found by ID`,
-									{ docId, docPath: docRef.path, collectionPath: col.path },
-								);
-							}
-							return null as any;
-						}
-						const data = doc.data();
-						if (debugLogs) {
-							console.log(
-								`[Firestore Adapter] FINDONE ${model} - raw Firestore data:`,
-								data,
-							);
-							console.log(
-								`[Firestore Adapter] FINDONE ${model} - doc.id:`,
-								doc.id,
-							);
-							console.log(
-								`[Firestore Adapter] FINDONE ${model} - data keys:`,
-								Object.keys(data || {}),
-							);
-						}
-						if (!data || Object.keys(data).length === 0) return null as any;
-
-						const result: any = { id: doc.id };
-						for (const [k, v] of Object.entries(data)) {
-							if (k === "__name__") continue;
-							const fieldName = mapper.fromDb(k);
-							const convertedValue = convertTimestamp(v);
-							result[fieldName] = convertedValue;
-							if (debugLogs) {
-								console.log(
-									`[Firestore Adapter] FINDONE ${model} - mapped field:`,
-									{
-										dbField: k,
-										appField: fieldName,
-										rawValue: v,
-										convertedValue,
-									},
-								);
-							}
-						}
-						if (restWhere && !matchesWhere(result, restWhere))
-							return null as any;
-
-						if (debugLogs) {
-							console.log(
-								`[Firestore Adapter] FINDONE ${model} - result before select:`,
-								result,
-							);
-						}
-
-						if (select && select.length > 0) {
-							const selected: any = { id: doc.id };
-							for (const field of select) {
-								if (result[field] !== undefined) {
-									selected[field] = result[field];
-								}
-							}
-							if (debugLogs) {
-								console.log(
-									`[Firestore Adapter] FINDONE ${model} - returning selected:`,
-									selected,
-								);
-							}
-							return selected;
-						}
-
-						if (debugLogs) {
-							console.log(
-								`[Firestore Adapter] FINDONE ${model} - returning result:`,
-								result,
-							);
-						}
-						return result;
-					}
-
 					if (debugLogs) {
 						console.log(`[Firestore Adapter] FINDONE ${model}:`, {
 							where,
 							select,
-							collection: collections,
+							collectionRef: col.path,
 						});
 					}
-					let snapshotSize = 0;
-					let snapshotDocsLength = 0;
-					let doc: FirebaseFirestore.QueryDocumentSnapshot | undefined;
-					for (const whereClause of getChunkedWhereClauses(where)) {
-						const q = applyWhereClause(col, whereClause, mapper);
-						const snap = await q.limit(1).get();
-						snapshotSize = snap.size;
-						snapshotDocsLength = snap.docs.length;
-						doc = snap.docs[0];
-						if (doc) break;
-					}
-					if (debugLogs) {
-						console.log(
-							`[Firestore Adapter] FINDONE ${model} - snapshot size:`,
-							snapshotSize,
-							"docs:",
-							snapshotDocsLength,
-						);
-					}
-					if (!doc || !doc.exists) {
+					const [match] = await readMatches(directReader, col, where, mapper, {
+						limit: 1,
+					});
+					// A document without a single field is not a row.
+					if (!match || Object.keys(match.row).length <= 1) {
 						if (debugLogs) {
 							console.log(
 								`[Firestore Adapter] FINDONE ${model} - no document found`,
@@ -1874,638 +1492,68 @@ export const firestoreAdapter: (
 						}
 						return null as any;
 					}
-					const data = doc.data();
+					const result = selectFields(match.row, select);
 					if (debugLogs) {
 						console.log(
-							`[Firestore Adapter] FINDONE ${model} - raw Firestore data:`,
-							data,
-						);
-						console.log(
-							`[Firestore Adapter] FINDONE ${model} - doc.id:`,
-							doc.id,
-						);
-						console.log(
-							`[Firestore Adapter] FINDONE ${model} - data keys:`,
-							Object.keys(data || {}),
-						);
-					}
-					if (!data || Object.keys(data).length === 0) return null as any;
-
-					const result: any = { id: doc.id };
-					for (const [k, v] of Object.entries(data)) {
-						if (k === "__name__") continue; // Skip Firestore internal fields
-						const fieldName = mapper.fromDb(k);
-						const convertedValue = convertTimestamp(v);
-						result[fieldName] = convertedValue;
-						if (debugLogs) {
-							console.log(
-								`[Firestore Adapter] FINDONE ${model} - mapped field:`,
-								{
-									dbField: k,
-									appField: fieldName,
-									rawValue: v,
-									convertedValue,
-								},
-							);
-						}
-					}
-
-					if (debugLogs) {
-						console.log(
-							`[Firestore Adapter] FINDONE ${model} - result before select:`,
+							`[Firestore Adapter] FINDONE ${model} - returning:`,
 							result,
 						);
 					}
-
-					if (select && select.length > 0) {
-						const selected: any = { id: doc.id };
-						for (const field of select) {
-							if (result[field] !== undefined) {
-								selected[field] = result[field];
-							}
-						}
-						if (debugLogs) {
-							console.log(
-								`[Firestore Adapter] FINDONE ${model} - returning selected:`,
-								selected,
-							);
-						}
-						return selected;
-					}
-
-					if (debugLogs) {
-						console.log(
-							`[Firestore Adapter] FINDONE ${model} - returning result:`,
-							result,
-						);
-					}
-					return result;
+					return result as any;
 				},
 				findMany: async ({ model, where, limit, offset, sortBy }) => {
 					const col = getCollectionRef(db, model, collections);
 
-					// Special handling for ID-based queries
-					// Firestore document IDs are metadata, so we can't query them with .where()
-					if (where && where.length > 0) {
-						const idCondition = where.find((w) => w.field === "id");
-						if (idCondition) {
-							const op = (idCondition.operator || "eq") as string;
-
-							// Handle "in" operator with IDs - fetch multiple documents directly
-							if (op === "in") {
-								const ids = (
-									Array.isArray(idCondition.value)
-										? idCondition.value
-										: [idCondition.value]
-								).filter((id): id is string => typeof id === "string");
-								if (debugLogs) {
-									console.log(
-										`[Firestore Adapter] FINDMANY ${model} [using direct doc lookups for IDs]:`,
-										{
-											where,
-											ids,
-										},
-									);
-								}
-
-								// Fetch all documents by ID
-								const docPromises = ids.map((id) => col.doc(id).get());
-								const docs = await Promise.all(docPromises);
-
-								// Filter out non-existent documents and map to results
-								let results = docs
-									.filter((doc) => doc.exists)
-									.map((doc) => {
-										const data = doc.data();
-										if (!data) return null;
-										const result: any = { id: doc.id };
-										for (const [k, v] of Object.entries(data)) {
-											result[mapper.fromDb(k)] = convertTimestamp(v);
-										}
-										return result;
-									})
-									.filter((r) => r !== null) as any[];
-
-								// Apply additional filtering for other conditions if any
-								const otherConditions = where.filter((w) => w.field !== "id");
-								if (otherConditions.length > 0) {
-									// Every operator, in memory — not just `eq`: a range on
-									// `expiresAt` used to be ignored here.
-									results = results.filter((r: any) =>
-										matchesWhere(r, otherConditions),
-									);
-								}
-
-								// Apply sorting if needed
-								if (sortBy?.field) {
-									results.sort((a: any, b: any) => {
-										const aVal = a[sortBy.field];
-										const bVal = b[sortBy.field];
-										const dir = sortBy.direction === "desc" ? -1 : 1;
-										if (aVal < bVal) return -1 * dir;
-										if (aVal > bVal) return 1 * dir;
-										return 0;
-									});
-								}
-
-								// Apply offset and limit
-								if (offset) results = results.slice(offset);
-								if (limit) results = results.slice(0, limit);
-
-								return results;
-							}
-
-							// Handle "notIn" operator with IDs
-							if (op === "notIn" || op === "not_in") {
-								if (debugLogs) {
-									console.log(
-										`[Firestore Adapter] FINDMANY ${model} [handling notIn for IDs]:`,
-										{
-											where,
-										},
-									);
-								}
-								// Get all documents, then filter out the excluded IDs
-								const excludedIds = Array.isArray(idCondition.value)
-									? idCondition.value
-									: [idCondition.value];
-								const snap = await col.get();
-								let results = snap.docs
-									.filter((doc) => !excludedIds.includes(doc.id))
-									.map((doc) => {
-										const data = doc.data();
-										const result: any = { id: doc.id };
-										for (const [k, v] of Object.entries(data)) {
-											result[mapper.fromDb(k)] = convertTimestamp(v);
-										}
-										return result;
-									});
-
-								// Apply other conditions
-								const otherConditions = where.filter((w) => w.field !== "id");
-								if (otherConditions.length > 0) {
-									// Every operator, in memory — not just `eq`: a range on
-									// `expiresAt` used to be ignored here.
-									results = results.filter((r: any) =>
-										matchesWhere(r, otherConditions),
-									);
-								}
-
-								// Apply sorting
-								if (sortBy?.field) {
-									results.sort((a: any, b: any) => {
-										const aVal = a[sortBy.field];
-										const bVal = b[sortBy.field];
-										const dir = sortBy.direction === "desc" ? -1 : 1;
-										if (aVal < bVal) return -1 * dir;
-										if (aVal > bVal) return 1 * dir;
-										return 0;
-									});
-								}
-
-								// Apply offset and limit
-								if (offset) results = results.slice(offset);
-								if (limit) results = results.slice(0, limit);
-
-								return results as any[];
-							}
-
-							// Handle ID "eq" - return an array with at most one doc, with any
-							// remaining conditions checked in memory
-							if (op === "eq" || !op) {
-								const docId = idCondition.value as string;
-								const doc = await col.doc(docId).get();
-								if (doc.exists) {
-									const data = doc.data();
-									if (data) {
-										const result: any = { id: doc.id };
-										for (const [k, v] of Object.entries(data)) {
-											result[mapper.fromDb(k)] = convertTimestamp(v);
-										}
-										const otherConditions = where.filter(
-											(w) => w !== idCondition,
-										);
-										if (matchesWhere(result, otherConditions)) return [result];
-									}
-								}
-								return [];
-							}
-						}
-					}
-
-					// Check for OR connectors - Firestore doesn't support OR natively
-					const hasOrConnector = where?.some((w) => w.connector === "OR");
-
-					if (hasOrConnector && where) {
-						// Handle OR connectors by fetching each condition separately and merging
-						const orGroups: WhereCondition[][] = [];
-						let currentGroup: WhereCondition[] = [];
-
-						for (const condition of where) {
-							if (condition.connector === "OR" && currentGroup.length > 0) {
-								orGroups.push([...currentGroup]);
-								currentGroup = [condition];
-							} else {
-								currentGroup.push(condition);
-							}
-						}
-						if (currentGroup.length > 0) {
-							orGroups.push(currentGroup);
-						}
-
-						// Fetch results for each OR group
-						const allResultsMap = new Map<string, any>();
-						for (const group of orGroups) {
-							// Results are merged and sorted in memory below, so we skip
-							// Firestore's orderBy to avoid composite-index requirements.
-							const q = applyWhereClause(col, group, mapper);
-							const snap = await q.get();
-							snap.docs.forEach((d) => {
-								const data = d.data();
-								const result: any = { id: d.id };
-								for (const [k, v] of Object.entries(data)) {
-									result[mapper.fromDb(k)] = convertTimestamp(v);
-								}
-								// Use ID as key to deduplicate
-								allResultsMap.set(d.id, result);
-							});
-						}
-
-						let results = Array.from(allResultsMap.values());
-
-						// Apply client-side filtering for operators not supported by Firestore
-						const notInCondition = where?.find(
-							(w) =>
-								(w.operator as string) === "notIn" ||
-								(w.operator as string) === "not_in",
-						);
-						if (notInCondition) {
-							const fieldName = notInCondition.field;
-							const arr = Array.isArray(notInCondition.value)
-								? notInCondition.value
-								: [notInCondition.value];
-							results = results.filter((r: any) => !arr.includes(r[fieldName]));
-						}
-
-						const endsWithCondition = where?.find(
-							(w) =>
-								(w.operator as string) === "endsWith" ||
-								(w.operator as string) === "ends-with" ||
-								(w.operator as string) === "ends_with",
-						);
-						if (endsWithCondition) {
-							const fieldName = endsWithCondition.field;
-							results = results.filter((r: any) => {
-								const value = r[fieldName]?.toString() || "";
-								return value.endsWith(endsWithCondition.value);
-							});
-						}
-
-						const containsCondition = where?.find(
-							(w) => (w.operator as string) === "contains",
-						);
-						if (containsCondition) {
-							const fieldName = containsCondition.field;
-							const searchValue = containsCondition.value?.toString() || "";
-							results = results.filter((r: any) => {
-								const fieldValue = r[fieldName];
-								// Check if field is an array - if so, use array includes
-								if (Array.isArray(fieldValue)) {
-									return fieldValue.includes(containsCondition.value);
-								}
-								// For strings, check if it contains the substring
-								const stringValue = fieldValue?.toString() || "";
-								return stringValue.includes(searchValue);
-							});
-						}
-
-						// Apply sorting (if not already sorted)
+					// Firestore sorts and pages natively only when it decides the
+					// whole where clause and the sort needs no composite index: a
+					// sort without a filter, or a filter without a sort (paged by
+					// document id; a range filter orders by its own field, so it
+					// takes a limit but no offset). A filtered and sorted query —
+					// the verification-token lookup (`identifier ==` ordered by
+					// `createdAt desc`) — is narrowed by Firestore and sorted here.
+					const exact = exactServerQuery(col, where, mapper);
+					const filtered = !!(where && where.length > 0);
+					if (
+						exact &&
+						!(sortBy?.field && filtered) &&
+						!(exact.hasRange && offset)
+					) {
+						let q = exact.query;
 						if (sortBy?.field) {
-							results.sort((a: any, b: any) => {
-								const aVal = a[sortBy.field];
-								const bVal = b[sortBy.field];
-								const dir = sortBy.direction === "desc" ? -1 : 1;
-								if (aVal < bVal) return -1 * dir;
-								if (aVal > bVal) return 1 * dir;
-								return 0;
-							});
-						}
-
-						// Apply offset and limit AFTER filtering
-						if (offset) results = results.slice(offset);
-						if (limit) results = results.slice(0, limit);
-
-						return results as any[];
-					}
-
-					// Firestore's `IN` operator caps at 30 values. If a simple non-ID
-					// `in` query carries more than 30 values, split into chunks and
-					// merge the results. Any post-filter sort / offset / limit is
-					// re-applied after the merge to preserve the caller-visible
-					// ordering and pagination.
-					const oversizedIn = findOversizedInClause(where);
-					if (oversizedIn) {
-						const merged = new Map<string, any>();
-						for (
-							let i = 0;
-							i < oversizedIn.value.length;
-							i += FIRESTORE_IN_CHUNK_SIZE
-						) {
-							const chunk = oversizedIn.value.slice(
-								i,
-								i + FIRESTORE_IN_CHUNK_SIZE,
+							q = q.orderBy(
+								mapper.toDb(sortBy.field),
+								sortBy.direction === "desc" ? "desc" : "asc",
 							);
-							const chunkedWhere = (where as WhereCondition[]).map((w) =>
-								w === oversizedIn
-									? { ...w, value: chunk as WhereCondition["value"] }
-									: w,
-							);
-							// Results are merged and sorted in memory below, so we skip
-							// Firestore's orderBy to avoid composite-index requirements.
-							const cq: FirebaseFirestore.Query = applyWhereClause(
-								col,
-								chunkedWhere,
-								mapper,
-							);
-							const csnap = await cq.get();
-							for (const d of csnap.docs) {
-								const data = d.data();
-								const result: Record<string, any> = { id: d.id };
-								for (const [k, v] of Object.entries(data)) {
-									result[mapper.fromDb(k)] = convertTimestamp(v);
-								}
-								merged.set(d.id, result);
-							}
+						} else if (offset) {
+							q = q.orderBy(FieldPath.documentId());
 						}
-						let results = Array.from(merged.values());
-						if (sortBy?.field) {
-							results.sort((a, b) => {
-								const aVal = a[sortBy.field];
-								const bVal = b[sortBy.field];
-								const dir = sortBy.direction === "desc" ? -1 : 1;
-								if (aVal < bVal) return -1 * dir;
-								if (aVal > bVal) return 1 * dir;
-								return 0;
-							});
-						}
-						if (offset) results = results.slice(offset);
-						if (limit) results = results.slice(0, limit);
-						return results as any[];
-					}
-
-					// Regular query path for non-ID queries
-					let q: FirebaseFirestore.Query = applyWhereClause(col, where, mapper);
-
-					const notInCondition = where?.find(
-						(w) =>
-							(w.operator as string) === "notIn" ||
-							(w.operator as string) === "not_in",
-					);
-					const hasNotIn = !!notInCondition;
-					const endsWithCondition = where?.find(
-						(w) =>
-							(w.operator as string) === "endsWith" ||
-							(w.operator as string) === "ends-with" ||
-							(w.operator as string) === "ends_with",
-					);
-					const hasEndsWith = !!endsWithCondition;
-					const containsCondition = where?.find(
-						(w) => (w.operator as string) === "contains",
-					);
-					const hasContains = !!containsCondition;
-
-					// If we have client-side filtering, we need to fetch all then filter before offset/limit
-					// Also, for "contains" on non-array fields, we need client-side filtering
-					if (hasNotIn || hasEndsWith || hasContains) {
-						// For contains on strings, don't apply the array-contains query - fetch all and filter
-						// For contains on arrays, we can use Firestore's array-contains
-						if (hasContains && containsCondition) {
-							// Check if we should use array-contains or client-side filtering
-							// For now, always do client-side filtering for contains to handle both cases
-							// Remove the contains condition from the query
-							const whereWithoutContains = where?.filter(
-								(w) => w !== containsCondition,
-							);
-							q = applyWhereClause(col, whereWithoutContains, mapper);
-						}
-
-						// Results are filtered and sorted in memory below, so we skip
-						// Firestore's orderBy to avoid composite-index requirements.
+						if (offset) q = q.offset(offset);
+						if (limit) q = q.limit(limit);
 						const snap = await q.get();
-						let results = snap.docs.map((d) => {
-							const data = d.data();
-							const result: any = { id: d.id };
-							for (const [k, v] of Object.entries(data)) {
-								result[mapper.fromDb(k)] = convertTimestamp(v);
-							}
-							return result;
-						});
-
-						if (hasNotIn && notInCondition) {
-							const fieldName = notInCondition.field;
-							const arr = Array.isArray(notInCondition.value)
-								? notInCondition.value
-								: [notInCondition.value];
-							results = results.filter((r: any) => !arr.includes(r[fieldName]));
-						}
-
-						if (hasEndsWith && endsWithCondition) {
-							const fieldName = endsWithCondition.field;
-							results = results.filter((r: any) => {
-								const value = r[fieldName]?.toString() || "";
-								return value.endsWith(endsWithCondition.value);
-							});
-						}
-
-						if (hasContains && containsCondition) {
-							const fieldName = containsCondition.field;
-							const searchValue = containsCondition.value?.toString() || "";
-							results = results.filter((r: any) => {
-								const fieldValue = r[fieldName];
-								// Check if field is an array - if so, use array includes
-								if (Array.isArray(fieldValue)) {
-									return fieldValue.includes(containsCondition.value);
-								}
-								// For strings, check if it contains the substring
-								const stringValue = fieldValue?.toString() || "";
-								return stringValue.includes(searchValue);
-							});
-						}
-
-						// Apply sorting if not already sorted
-						if (sortBy?.field) {
-							results.sort((a: any, b: any) => {
-								const aVal = a[sortBy.field];
-								const bVal = b[sortBy.field];
-								const dir = sortBy.direction === "desc" ? -1 : 1;
-								if (aVal < bVal) return -1 * dir;
-								if (aVal > bVal) return 1 * dir;
-								return 0;
-							});
-						}
-
-						// Apply offset and limit AFTER client-side filtering
-						if (offset) results = results.slice(offset);
-						if (limit) results = results.slice(0, limit);
-
-						return results as any[];
+						return snap.docs.map((d) => ({
+							id: d.id,
+							...dbDataToAppData(d.data(), mapper),
+						})) as any[];
 					}
 
-					// No client-side filtering needed.
-					//
-					// When a query pairs a `where` filter with a `sortBy` on a
-					// different field, Firestore demands a composite index — this is
-					// exactly the verification-token lookup better-auth performs
-					// (`identifier ==` ordered by `createdAt desc`). Instead of
-					// forcing every consumer to provision that index, we let
-					// Firestore apply the filter server-side (covered by automatic
-					// single-field indexes) and sort the already-narrowed matches in
-					// memory. This mirrors the transaction `findMany` path.
-					const hasWhereFilter = !!(where && where.length > 0);
-					if (sortBy?.field && hasWhereFilter) {
-						const filteredSnap = await q.get();
-						let ordered = filteredSnap.docs.map((d) => {
-							const data = d.data();
-							const result: any = { id: d.id };
-							for (const [k, v] of Object.entries(data)) {
-								result[mapper.fromDb(k)] = convertTimestamp(v);
-							}
-							return result;
-						});
-						ordered.sort((a: any, b: any) => {
-							const aVal = a[sortBy.field];
-							const bVal = b[sortBy.field];
-							const dir = sortBy.direction === "desc" ? -1 : 1;
-							if (aVal < bVal) return -1 * dir;
-							if (aVal > bVal) return 1 * dir;
-							return 0;
-						});
-						if (offset) ordered = ordered.slice(offset);
-						if (limit) ordered = ordered.slice(0, limit);
-						return ordered as any[];
-					}
-
-					// No filter (or no sort): a lone `orderBy`/offset is served by an
-					// automatic single-field index, so Firestore can page natively.
-					// Firestore requires orderBy before using offset.
-					if (offset && !sortBy?.field) {
-						// If offset is provided but no sortBy, order by document ID for consistent results
-						q = q.orderBy(FieldPath.documentId());
-					} else if (sortBy?.field) {
-						const fieldName = mapper.toDb(sortBy.field);
-						const direction = sortBy.direction === "desc" ? "desc" : "asc";
-						q = q.orderBy(fieldName, direction);
-					}
-
-					if (offset) q = q.offset(offset);
-					if (limit) q = q.limit(limit);
-
-					const snap = await q.get();
-					const results = snap.docs.map((d) => {
-						const data = d.data();
-						const result: any = { id: d.id };
-						for (const [k, v] of Object.entries(data)) {
-							result[mapper.fromDb(k)] = convertTimestamp(v);
-						}
-						return result;
-					});
-
+					let results = sortRows(
+						(await readMatches(directReader, col, where, mapper)).map(
+							(m) => m.row,
+						),
+						sortBy,
+					);
+					if (offset) results = results.slice(offset);
+					if (limit) results = results.slice(0, limit);
 					return results as any[];
 				},
 				count: async ({ model, where }) => {
 					const col = getCollectionRef(db, model, collections);
-
-					// Special handling for ID-based queries
-					if (where && where.length > 0) {
-						const idCondition = where.find((w) => w.field === "id");
-						if (idCondition) {
-							const op = (idCondition.operator || "eq") as string;
-
-							// Handle "in" operator with IDs
-							if (op === "in") {
-								const ids = (
-									Array.isArray(idCondition.value)
-										? idCondition.value
-										: [idCondition.value]
-								).filter((id): id is string => typeof id === "string");
-								const docPromises = ids.map((id) => col.doc(id).get());
-								const docs = await Promise.all(docPromises);
-								// Remaining conditions are checked in memory.
-								const otherConditions = where.filter((w) => w.field !== "id");
-								return docs.filter(
-									(doc) =>
-										doc.exists &&
-										matchesWhere(
-											{
-												id: doc.id,
-												...dbDataToAppData(doc.data() ?? {}, mapper),
-											},
-											otherConditions,
-										),
-								).length;
-							}
-
-							// Handle "notIn" operator with IDs
-							if (op === "notIn" || op === "not_in") {
-								const excludedIds = (
-									Array.isArray(idCondition.value)
-										? idCondition.value
-										: [idCondition.value]
-								).filter((id): id is string => typeof id === "string");
-								const snap = await col.get();
-								return snap.docs.filter((doc) => !excludedIds.includes(doc.id))
-									.length;
-							}
-
-							// Handle ID "eq", with any remaining conditions checked in memory
-							if (op === "eq" || !op) {
-								const doc = await col.doc(idCondition.value as string).get();
-								if (!doc.exists) return 0;
-								const otherConditions = where.filter((w) => w !== idCondition);
-								return matchesWhere(
-									{ id: doc.id, ...dbDataToAppData(doc.data() ?? {}, mapper) },
-									otherConditions,
-								)
-									? 1
-									: 0;
-							}
-						}
+					const exact = exactServerQuery(col, where, mapper);
+					if (exact) {
+						const snap = await exact.query.count().get();
+						return snap.data().count ?? 0;
 					}
-
-					const notInCondition = where?.find(
-						(w) =>
-							(w.operator as string) === "notIn" ||
-							(w.operator as string) === "not_in",
-					);
-					const whereClauses = getChunkedWhereClauses(where);
-					if (notInCondition || whereClauses.length > 1) {
-						const matchingIds = new Set<string>();
-						for (const whereClause of whereClauses) {
-							const q = applyWhereClause(col, whereClause, mapper);
-							const snap = await q.get();
-							for (const d of snap.docs) {
-								if (notInCondition) {
-									const fieldName = notInCondition.field;
-									const arr = Array.isArray(notInCondition.value)
-										? notInCondition.value
-										: [notInCondition.value];
-									const data = d.data();
-									const value = data[mapper.toDb(fieldName)];
-									if (arr.includes(value)) continue;
-								}
-								matchingIds.add(d.id);
-							}
-						}
-						return matchingIds.size;
-					}
-
-					const q: FirebaseFirestore.Query = applyWhereClause(
-						col,
-						where,
-						mapper,
-					);
-					const snap = await q.count().get();
-					return snap.data().count ?? 0;
+					return (await readMatches(directReader, col, where, mapper)).length;
 				},
 			};
 		},
