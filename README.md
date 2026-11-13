@@ -14,15 +14,9 @@
 - **Example:** See [`/examples/minimal`](./examples/minimal) for a complete Next.js App Router example
 - **AI skill:** [`firestore-better-auth` on skills.sh](https://skills.sh/yultyyev/better-auth-firestore/firestore-better-auth) for Cursor, Claude Code, Codex & 70+ agents — `npx skills add yultyyev/better-auth-firestore` • [llms.txt](./llms.txt)
 
-> [!IMPORTANT]
-> **Upgrading to Better Auth 1.7 with existing users?** Go straight to 1.7.3 or later: it identifies accounts by `(providerId, accountId)`, as 1.6 did, so no data migration is needed. Only 1.7.0–1.7.2 look accounts up by an `issuer` field that older documents don't have; if you deploy one of those, existing users can't sign in until it's backfilled:
+> *"Use Firestore as the database for my Better Auth app."*
 >
-> ```bash
-> npx better-auth-firestore backfill-account-issuers          # dry run — prints a report
-> npx better-auth-firestore backfill-account-issuers --apply  # writes
-> ```
->
-> On 1.7.0–1.7.2 the adapter warns on startup while any account document is missing it. Details: [Upgrading to Better Auth 1.7](#upgrading-to-better-auth-17).
+> With the [agent skill](#set-it-up-with-your-ai-agent) installed, Claude Code, Cursor or Codex follows it: installs the packages, sets up Firebase Admin credentials (including the `FIREBASE_PRIVATE_KEY` newline fix), adds `firestoreAdapter` to `betterAuth()`, and keeps the auth routes off the Edge runtime.
 
 ---
 
@@ -117,6 +111,36 @@ export const auth = betterAuth({
 		},
 	}),
 });
+```
+
+## Set it up with your AI agent
+
+Install the [agent skill](https://skills.sh/yultyyev/better-auth-firestore/firestore-better-auth) once, and Claude Code, Cursor, Codex, Copilot, Windsurf and [70+ other agents](https://skills.sh) can set the adapter up from a plain request:
+
+```bash
+npx skills add yultyyev/better-auth-firestore
+```
+
+Then paste one of these prompts:
+
+```text
+Use Firestore as the database for my Better Auth app.
+```
+
+```text
+Add Better Auth to my Firebase app without Postgres.
+```
+
+```text
+Move my Auth.js / NextAuth Firebase adapter setup to Better Auth with Firestore.
+```
+
+```text
+Set up the Firestore emulator for Better Auth local development and tests.
+```
+
+```text
+Fix the FIREBASE_PRIVATE_KEY error in my Better Auth Firestore setup.
 ```
 
 ## Firebase Setup
@@ -304,6 +328,8 @@ The scoped package `@yultyyev/better-auth-firestore` was unpublished from npm in
 That's it! The API is identical, so no code changes are needed beyond the import path.
 
 ## Upgrading to Better Auth 1.7
+
+**Starting a new app?** Use Better Auth 1.7.3 or later. Nothing in this section applies to you.
 
 Better Auth 1.7 changed how accounts are identified and what it requires from database adapters. Two things matter for Firestore users — read the official [1.7 upgrade guide](https://better-auth.com/docs/guides/1-7-upgrade-guide) for everything else (OAuth provider, SSO, SCIM, MCP, …).
 
