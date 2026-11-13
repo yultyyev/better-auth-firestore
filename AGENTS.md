@@ -137,6 +137,8 @@ FIRESTORE_EMULATOR_HOST=localhost:8080 pnpm vitest run
 
 CI runs three things on every PR: the lint/build/test job as a matrix against the lockfile's Better Auth (1.7) and the latest 1.6 (`pnpm add -D better-auth@1.6`), each ending with `pnpm verify:pack`; and a `types` job that typechecks and builds under TypeScript 5, 6 and 7. Keep all of them green — the adapter promises to work with every combination.
 
+`tests/conformance.test.ts` runs Better Auth's own adapter conformance suite (`@better-auth/test-utils/adapter`) in a separate emulator project. Keep `@better-auth/test-utils` on the same version as the `better-auth` devDependency; the file skips itself on the 1.6 job. Only `findMany - should select fields` is disabled, because `findMany` ignores `select`.
+
 ## Commit Messages
 
 Follow Conventional Commits:
